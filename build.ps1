@@ -48,7 +48,7 @@ function Res($name) {
 if ($Stage -in @("all", "app")) {
   $res = Res "app"
   $exe = Join-Path $out "FogForge.exe"
-  & $csc /nologo /target:winexe /optimize+ "/out:$exe" "/win32res:$res" "/resource:$(Join-Path $src 'logo.png'),logo.png" "/resource:$(Join-Path $src 'banner.jpg'),banner.jpg" @refs @common
+  & $csc /nologo /target:winexe /optimize+ "/out:$exe" "/win32res:$res" "/resource:$(Join-Path $src 'logo.png'),logo.png" "/resource:$(Join-Path $src 'banner.jpg'),banner.jpg" "/resource:$(Join-Path $src 'default.jpg'),default.jpg" @refs @common
   if ($LASTEXITCODE -ne 0) { throw "Building FogForge.exe failed" }
   Write-Host "Built $exe"
   if ($AppExe -eq "") { $AppExe = $exe }
@@ -61,7 +61,7 @@ if ($Stage -in @("all", "setup")) {
   $embedded = Join-Path $obj "app.exe"
   Copy-Item $AppExe $embedded -Force
   $setup = Join-Path $out "FogForge Setup.exe"
-  & $csc /nologo /target:winexe /optimize+ /main:DbdCustom.SetupProgram "/out:$setup" "/win32res:$res" "/resource:$embedded,app.exe" "/resource:$(Join-Path $src 'logo.png'),logo.png" "/resource:$(Join-Path $src 'banner.jpg'),banner.jpg" @refs @common (Join-Path $src "Installer.cs")
+  & $csc /nologo /target:winexe /optimize+ /main:DbdCustom.SetupProgram "/out:$setup" "/win32res:$res" "/resource:$embedded,app.exe" "/resource:$(Join-Path $src 'logo.png'),logo.png" "/resource:$(Join-Path $src 'banner.jpg'),banner.jpg" "/resource:$(Join-Path $src 'default.jpg'),default.jpg" @refs @common (Join-Path $src "Installer.cs")
   if ($LASTEXITCODE -ne 0) { throw "Building the installer failed" }
   Write-Host "Built $setup"
 }

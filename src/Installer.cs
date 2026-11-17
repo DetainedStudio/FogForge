@@ -651,7 +651,7 @@ namespace DbdCustom
                         Directory.CreateDirectory(Path.GetDirectoryName(t)); File.Copy(files[i], t, true);
                         if (i % 20 == 0) bw.ReportProgress(70 + i * 20 / Math.Max(1, files.Count), L.F("Default-Pack wird erstellt … {0} / {1}", i + 1, files.Count));
                     }
-                    try { using (var s = SetupProgram.Res("banner.jpg")) using (var f = File.Create(Path.Combine(dir, @"Packs\Default\preview.jpg"))) s.CopyTo(f); } catch { }
+                    try { using (var s = SetupProgram.Res("default.jpg") ?? SetupProgram.Res("banner.jpg")) using (var f = File.Create(Path.Combine(dir, @"Packs\Default\preview.jpg"))) s.CopyTo(f); } catch { }
                 }
                 bw.ReportProgress(92, L.T("Verknüpfungen werden erstellt …"));
                 try { if (desk) SetupProgram.Shortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "FogForge.lnk"), exe, "FogForge"); } catch { }

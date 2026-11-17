@@ -26,7 +26,7 @@ using Microsoft.Win32;
 namespace DbdCustom
 {
     // Programmversion – bei jedem Release erhöhen und als Tag v<Version> auf GitHub veröffentlichen
-    static class AppInfo { public const string Version = "4.2.0"; }
+    static class AppInfo { public const string Version = "4.2.1"; }
 
     // ============================================================ Design
     static class UI
@@ -1438,13 +1438,14 @@ namespace DbdCustom
                 p.Preview = LoadPreview(p); packs.Add(p);
             }
             var def = packs.FirstOrDefault(x => x.Name.Equals("Default", StringComparison.OrdinalIgnoreCase));
-            // altes Installer-Banner mit Spielfiguren durch das neue ersetzen
+            // Default-Pack: klassisches Vorschaubild (Trapper, Huntress, Meg)
             if (def != null)
                 try
                 {
-                    var pf = Path.Combine(def.Dir, "preview.jpg");
-                    if (!File.Exists(pf) || new FileInfo(pf).Length == 163633)
-                        using (var st = typeof(MainForm).Assembly.GetManifestResourceStream("banner.jpg"))
+                    var pf = Path.Combine(def.Dir, "preview.jpg"); long len = File.Exists(pf) ? new FileInfo(pf).Length : -1;
+                    long bannerLen = -1; using (var bs = typeof(MainForm).Assembly.GetManifestResourceStream("banner.jpg")) if (bs != null) bannerLen = bs.Length;
+                    if (len < 0 || len == bannerLen || len == 127249 || len == 133020)
+                        using (var st = typeof(MainForm).Assembly.GetManifestResourceStream("default.jpg"))
                             if (st != null)
                             {
                                 if (def.Preview != null) def.Preview.Dispose();

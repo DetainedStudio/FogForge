@@ -160,7 +160,26 @@ namespace DbdCustom
             }
             // Icon-Anzahl aller Packs gleichzeitig lesen
             var ths = list.Select(p => new System.Threading.Thread(() => { try { ReadIndex(p, cacheDir); } catch { } }) { IsBackground = true }).ToList();
-            ths.ForEach(t => t.Start()); ths.ForEach(t => t.Join(25000));
+            ths.ForEach(t => t.Start()); ths.ForEach(t => t.Join(40000));
+            // fehlgeschlagene Packs (z. B. gerade frisch hochgeladen) noch einmal versuchen …
+            var failed = list.Where(p => p.Counts.Count == 0).ToList();
+            if (failed.Count > 0)
+            {
+                System.Threading.Thread.Sleep(2500);
+                foreach (var p in failed) try { ReadIndex(p, cacheDir); } catch { }
+            }
+            // … und sonst mit den zuletzt bekannten Zahlen anzeigen statt ganz auszublenden
+            if (list.Any(p => p.Counts.Count == 0))
+                try
+                {
+                    var old = LoadCache(Path.Combine(cacheDir, "catalog.txt"));
+                    foreach (var p in list.Where(x => x.Counts.Count == 0))
+                    {
+                        var o = old.FirstOrDefault(x => x.Name.Equals(p.Name, StringComparison.OrdinalIgnoreCase));
+                        if (o != null) { foreach (var kv in o.Counts) p.Counts[kv.Key] = kv.Value; p.Icons = o.Icons; }
+                    }
+                }
+                catch { }
             return list.Where(p => p.Counts.Count > 0).ToList();
         }
 
