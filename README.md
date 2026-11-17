@@ -31,7 +31,7 @@ Get the latest **FogForge Setup.exe** from the [Releases](../../releases/latest)
 4. Start FogForge, pick a pack on the left and click **Activate**.
    Keep Dead by Daylight closed while doing this.
 
-To go back to the original icons, select the **Default** pack and activate it.
+To go back to the original icons, click **Unload** in FogForge.
 To uninstall, open **Windows Settings › Apps › FogForge › Uninstall**. Your original icons are restored.
 
 ## How it works
@@ -56,6 +56,29 @@ Some icons (for example the offerings on the loading screen) are stored inside t
 ## Icon packs
 
 The packs are hosted separately in [fog-forge-packs](../../../fog-forge-packs). You don't need to download them manually – FogForge does it for you.
+
+## Building from source
+
+FogForge is a C# WinForms app for .NET Framework 4.5. On Windows with the Windows SDK installed:
+
+```powershell
+./build.ps1          # builds out/FogForge.exe and out/FogForge Setup.exe
+```
+
+Releases are built automatically by GitHub Actions from this repository when a release is published (see [`.github/workflows/release.yml`](.github/workflows/release.yml)).
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+Details, team roles and what is signed: [Code signing policy](CODE_SIGNING.md).
+
+## Privacy
+
+This program will not transfer any personal information to other networked systems. It only contacts GitHub to check for updates and to download icon packs. See [PRIVACY.md](PRIVACY.md).
+
+## License
+
+FogForge is open source under the [MIT License](LICENSE).
 
 ## Disclaimer
 
