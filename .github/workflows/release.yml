@@ -1,8 +1,14 @@
-# Builds FogForge from source when a release is published, signs it via SignPath
-# (once SignPath is set up) and attaches "FogForge Setup.exe" to the release.
+# Builds FogForge from source, signs it via SignPath (once SignPath is set up)
+# and publishes "FogForge Setup.exe" as a GitHub release.
+# Triggers:
+#   - pushing a version tag (v1.2.3): the release is created automatically,
+#     its notes are taken from the annotated tag message
+#   - publishing a release by hand on GitHub: the installer is attached to it
 name: Build release
 
 on:
+  push:
+    tags: ['v*']
   release:
     types: [published]
   workflow_dispatch:
@@ -19,12 +25,12 @@ jobs:
   build:
     runs-on: windows-latest
     env:
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
       SIGN: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
 
       - name: Check version
         shell: pwsh
@@ -89,11 +95,23 @@ jobs:
         shell: pwsh
         run: Copy-Item "signed-setup/FogForge Setup.exe" "out/FogForge Setup.exe" -Force
 
-      - name: Attach installer to the release
+      - name: Publish installer
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           Copy-Item "out/FogForge Setup.exe" "out/FogForge.Setup.exe" -Force
-          gh release upload $env:TAG "out/FogForge.Setup.exe" --clobber --repo $env:GITHUB_REPOSITORY
+          $ver = $env:TAG.TrimStart('v')
+          gh release view $env:TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:TAG "out/FogForge.Setup.exe" --clobber --repo $env:GITHUB_REPOSITORY
+          } else {
+            # release notes = message of the annotated tag
+            git fetch --force origin "refs/tags/$($env:TAG):refs/tags/$($env:TAG)" 2>$null
+            $notes = (git for-each-ref "refs/tags/$($env:TAG)" --format='%(contents)') -join "`n"
+            if ([string]::IsNullOrWhiteSpace($notes)) { $notes = "FogForge $ver" }
+            Set-Content -Path out/notes.md -Value $notes -Encoding utf8
+            gh release create $env:TAG "out/FogForge.Setup.exe" --repo $env:GITHUB_REPOSITORY --title "FogForge $ver" --notes-file out/notes.md --latest
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Publishing the release failed" }
           (Get-FileHash "out/FogForge.Setup.exe" -Algorithm SHA256).Hash
