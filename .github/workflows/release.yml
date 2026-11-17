@@ -1,0 +1,99 @@
+# Builds FogForge from source when a release is published, signs it via SignPath
+# (once SignPath is set up) and attaches "FogForge Setup.exe" to the release.
+name: Build release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to (re)build, e.g. v4.1.3"
+        required: true
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      SIGN: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Check version
+        shell: pwsh
+        run: |
+          $m = Select-String -Path src/DbdPackManager.cs -Pattern 'public const string Version = "([\d.]+)"' | Select-Object -First 1
+          $ver = $m.Matches[0].Groups[1].Value
+          if ("v$ver" -ne $env:TAG) { throw "Tag $env:TAG does not match the version in the source code (v$ver). Use tag v$ver." }
+          Write-Host "Building FogForge $ver"
+
+      - name: Build FogForge.exe
+        shell: pwsh
+        run: ./build.ps1 -Stage app
+
+      # ---- signing (only when SignPath is configured) ----
+      - name: Upload unsigned app
+        if: env.SIGN == 'true'
+        id: up-app
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-unsigned
+          path: out/FogForge.exe
+      - name: Sign app
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'FogForge' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG || 'release-signing' }}
+          github-artifact-id: ${{ steps.up-app.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-app
+      - name: Use signed app
+        if: env.SIGN == 'true'
+        shell: pwsh
+        run: Copy-Item signed-app/FogForge.exe out/FogForge.exe -Force
+
+      - name: Build installer
+        shell: pwsh
+        run: ./build.ps1 -Stage setup -AppExe out/FogForge.exe
+
+      - name: Upload unsigned installer
+        if: env.SIGN == 'true'
+        id: up-setup
+        uses: actions/upload-artifact@v4
+        with:
+          name: setup-unsigned
+          path: out/FogForge Setup.exe
+      - name: Sign installer
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'FogForge' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG || 'release-signing' }}
+          github-artifact-id: ${{ steps.up-setup.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-setup
+      - name: Use signed installer
+        if: env.SIGN == 'true'
+        shell: pwsh
+        run: Copy-Item "signed-setup/FogForge Setup.exe" "out/FogForge Setup.exe" -Force
+
+      - name: Attach installer to the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Copy-Item "out/FogForge Setup.exe" "out/FogForge.Setup.exe" -Force
+          gh release upload $env:TAG "out/FogForge.Setup.exe" --clobber --repo $env:GITHUB_REPOSITORY
+          (Get-FileHash "out/FogForge.Setup.exe" -Algorithm SHA256).Hash
