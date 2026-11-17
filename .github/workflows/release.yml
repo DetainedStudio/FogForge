@@ -1,16 +1,13 @@
 # Builds FogForge from source, signs it via SignPath (once SignPath is set up)
 # and publishes "FogForge Setup.exe" as a GitHub release.
-# Triggers:
-#   - pushing a version tag (v1.2.3): the release is created automatically,
-#     its notes are taken from the annotated tag message
-#   - publishing a release by hand on GitHub: the installer is attached to it
+# Runs when a version tag (v1.2.3) appears - also when a release with a new tag
+# is published on GitHub. If the release exists, the installer is attached to it;
+# otherwise the release is created (notes from the annotated tag message).
 name: Build release
 
 on:
   push:
     tags: ['v*']
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -20,6 +17,10 @@ on:
 permissions:
   contents: write
   actions: read
+
+concurrency:
+  group: release-${{ github.ref_name }}-${{ inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
   build:
