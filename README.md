@@ -11,9 +11,12 @@ FogForge lets you install, switch and remove icon packs for Dead by Daylight wit
 ## Features
 
 - **One-click packs** – activate a pack, switch to another one or go back to the original icons at any time.
-- **Built-in pack store** – browse and download packs directly in the app. Updated packs are detected automatically.
-- **Pack preview** – look at every icon of a pack before you install it, with search and Killer/Survivor filters.
-- **Choose what to change** – apply only the categories you want, e.g. just perks and portraits.
+- **Built-in pack store** – browse and download packs directly in the app. New and updated packs are marked automatically.
+- **Pack preview** – look at every icon of a pack before you install it, with search, Killer/Survivor filters and a before/after slider.
+- **Mix packs** – take each category from a different pack, e.g. portraits from Cartoon and perks from Comic.
+- **Pick single icons** – use individual icons from other packs, e.g. only your favourite killer.
+- **Survives game updates** – if a Dead by Daylight update resets your icons, FogForge re-applies your pack with one click (or automatically).
+- **Choose what to change** – apply only the categories you want.
 - **Automatic backups** – your original icons are saved before anything is replaced.
 - **Automatic updates** – FogForge tells you when a new version is available and updates itself.
 - **10 languages** – English, German, Spanish, French, Italian, Portuguese, Polish, Russian, Turkish and Dutch.

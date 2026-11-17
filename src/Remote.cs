@@ -165,15 +165,22 @@ namespace DbdCustom
         }
 
         // Inhaltsverzeichnis der ZIP vom Dateiende lesen (ohne die ZIP herunterzuladen) -> Icons je Kategorie
+        // Platzhalter/Testbilder des Spiels (Missing, Missing01…, PowerTemp…, empty) – nicht mitzählen/anzeigen
+        public static bool IsPlaceholder(string path)
+        {
+            var p = (path ?? "").Replace('\\', '/'); var name = Path.GetFileNameWithoutExtension(p);
+            return System.Text.RegularExpressions.Regex.IsMatch(name, @"^(Missing\d*|empty)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+                || name.IndexOf("PowerTemp", StringComparison.OrdinalIgnoreCase) >= 0 || p.IndexOf("/Missing/", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
         static void ReadIndex(RPack p, string cacheDir)
         {
-            var cf = Path.Combine(cacheDir, p.Name + "-" + (p.Stamp.Length > 16 ? p.Stamp.Substring(0, 16) : p.Stamp.Replace(':', '_').Replace('/', '_')) + ".idx");
+            var cf = Path.Combine(cacheDir, p.Name + "-" + (p.Stamp.Length > 16 ? p.Stamp.Substring(0, 16) : p.Stamp.Replace(':', '_').Replace('/', '_')) + ".idx2");
             if (System.IO.File.Exists(cf))
             {
                 foreach (var l in System.IO.File.ReadAllLines(cf)) { var kv = l.Split('='); int n; if (kv.Length == 2 && int.TryParse(kv[1], out n)) p.Counts[kv[0]] = n; }
                 p.Icons = p.Counts.Values.Sum(); return;
             }
-            foreach (var e in ListEntries(p)) { int c; p.Counts.TryGetValue(e.Cat, out c); p.Counts[e.Cat] = c + 1; }
+            foreach (var e in ListEntries(p)) { if (IsPlaceholder(e.Name)) continue; int c; p.Counts.TryGetValue(e.Cat, out c); p.Counts[e.Cat] = c + 1; }
             p.Icons = p.Counts.Values.Sum();
             try { Directory.CreateDirectory(cacheDir); System.IO.File.WriteAllLines(cf, p.Counts.Select(kv => kv.Key + "=" + kv.Value).ToArray()); } catch { }
         }

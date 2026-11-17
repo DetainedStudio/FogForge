@@ -26,7 +26,7 @@ using Microsoft.Win32;
 namespace DbdCustom
 {
     // Programmversion – bei jedem Release erhöhen und als Tag v<Version> auf GitHub veröffentlichen
-    static class AppInfo { public const string Version = "4.1.3"; }
+    static class AppInfo { public const string Version = "4.2.0"; }
 
     // ============================================================ Design
     static class UI
@@ -195,7 +195,7 @@ namespace DbdCustom
         public bool Available; public PayloadFile Source; public string SourceDir; public Remote.RPack Rem; public bool Update;     // noch nicht installiert, aus Installer/ZIP verfügbar
         public Dictionary<string, int> Counts = new Dictionary<string, int>();
         public int Total { get { return Counts.Values.Sum(); } }
-        public Image Preview; public Bitmap Backdrop, Card, Hero;
+        public Image Preview; public Bitmap Backdrop, Card, Hero; public bool IsNew;
     }
 
     // Klickbarer Bereich mit weicher Hover-Animation
@@ -218,6 +218,9 @@ namespace DbdCustom
             int w = UI.S(longText != null ? 720 : 460);
             using (var g = CreateGraphics()) using (var f = UI.F(10.5f))
             {
+                // breit genug für alle Knöpfe
+                float need; using (var fb = UI.F(10.5f, FontStyle.Bold)) need = buttons.Sum(bt => g.MeasureString(bt, fb).Width + UI.S(44)) + UI.S(10) * (buttons.Length - 1) + UI.S(56);
+                w = Math.Max(w, (int)Math.Ceiling(need));
                 var sz = g.MeasureString(msg, f, w - UI.S(56));
                 Size = new Size(w, (int)sz.Height + UI.S(150) + (longText != null ? UI.S(330) : 0));
             }
@@ -566,6 +569,8 @@ namespace DbdCustom
             LoadPacks();
             FetchCatalog();
             CheckAppUpdate();
+            LoadOv();
+            periodic = new Timer { Interval = 30 * 60 * 1000 }; periodic.Tick += (s, e) => { if (!busy) CheckNow(false); }; periodic.Start();
 
             watcher = new FileSystemWatcher(packsDir) { NotifyFilter = NotifyFilters.DirectoryName | NotifyFilters.FileName, IncludeSubdirectories = false };
             refreshTimer = new Timer { Interval = 900 };
@@ -599,6 +604,7 @@ namespace DbdCustom
         {
             base.OnShown(e); ApplyRegion(); Invalidate();
             EnsureDefault();
+            CheckDrift();
         }
 
         // Default-Pack (Original-Icons) ist immer vorhanden – fehlt es, wird es aus dem Spiel erstellt
@@ -628,16 +634,12 @@ namespace DbdCustom
         void ShowMenu(RectangleF anchor)
         {
             if ((DateTime.Now - menuClosed).TotalMilliseconds < 250) return;   // erneuter Klick schließt nur
-            var m = new PopupMenu();
-            m.Add("\uD83D\uDCC2", L.T("Packs-Ordner öffnen"), () => Process.Start("explorer.exe", "\"" + packsDir + "\""));
-            m.Add("\u21BB", L.T("Packs neu laden"), () => LoadPacks(), !busy);
-            m.Sep();
-            m.Add("\uD83D\uDCBE", L.T("Aktuelle Spiel-Icons als Pack sichern"), DoExportGame, !busy && gamePath != null);
-            m.Add("\uD83D\uDCE6", L.T("Ausgewähltes Pack als ZIP speichern"), DoZip, !busy && sel != null && !sel.Available);
-            m.Add("\u2B07", L.T("Packs aus Datei installieren …"), PickPackSource, !busy);
+            var m = new PopupMenu { MenuWidth = 470 };
+            m.Add("\u21BB", L.T("Nach Updates suchen"), () => CheckNow(true), !busy);
+            m.Add(autoReapply ? "\u2611" : "\u2610", L.T("Packs nach Spiel-Updates automatisch neu anwenden"), () => { autoReapply = !autoReapply; SaveGamePath(); Log(autoReapply ? L.T("Packs werden nach Spiel-Updates automatisch neu angewendet.") : L.T("Nach Spiel-Updates wird vorher gefragt.")); });
+            if (iconOv.Count > 0) m.Add("\u2605", L.F("Einzel-Icons zurücksetzen ({0})", iconOv.Count), ResetOverrides, !busy);
             m.Sep();
             m.Add("\uD83C\uDFAE", L.T("Spielordner ändern …"), ChooseGame, !busy);
-            m.Add("\uD83D\uDCDC", L.T("Protokoll anzeigen"), () => DarkDialog.ShowText(this, L.T("Protokoll"), L.T("Alle Aktionen dieser Sitzung:"), string.Join(Environment.NewLine, logLines)));
             m.FormClosed += (s, e) => { menuClosed = DateTime.Now; m.Dispose(); };
             m.ShowAt(this, PointToScreen(new Point((int)anchor.Right, (int)anchor.Bottom + UI.S(8))));
         }
@@ -759,7 +761,10 @@ namespace DbdCustom
         void ShowPeek(Pack p)
         {
             string dir = p.Available ? p.SourceDir : p.Dir;
-            using (var d = new PackPreview(p.Name, dir != null && Directory.Exists(dir) ? dir : null, p.Rem, cacheDir)) d.ShowDialog(this);
+            MarkSeen(p);
+            var def = FindInstalled("Default");
+            using (var d = new PackPreview(p.Name, dir != null && Directory.Exists(dir) ? dir : null, p.Rem, cacheDir, !p.Available, def != null ? def.Dir : null, GetOv, SetOv)) d.ShowDialog(this);
+            Invalidate();
         }
 
         Hot AddHot(string id, RectangleF r, Action click, bool enabled = true, string tipText = null)
@@ -815,7 +820,7 @@ namespace DbdCustom
             var rmenu = new RectangleF(gx0 + wHelp + wLang, top, wMenu, ch);
             AddHot("help", rh, () => { using (var d = new HelpDialog()) d.ShowDialog(this); }, true, L.T("Hilfe & häufige Fragen"));
             AddHot("lang", rl, () => ShowLangMenu(rl), true, L.T("Sprache") + ": " + L.Name(L.Code));
-            AddHot("menu", rmenu, () => ShowMenu(rmenu), true, L.T("Mehr: Packs-Ordner, ZIP, Spiel-Icons sichern, Protokoll"));
+            AddHot("menu", rmenu, () => ShowMenu(rmenu), true, L.T("Mehr: Updates und Einstellungen"));
             using (var gp = UI.Round(grp, ch / 2))
             {
                 using (var b = new SolidBrush(Color.FromArgb(16, 255, 255, 255))) g.FillPath(b, gp);
@@ -973,7 +978,8 @@ namespace DbdCustom
                 if (p.Available)
                 {
                     using (var path = UI.Round(rr, UI.S(16))) using (var b = new SolidBrush(Color.FromArgb((int)(120 - 60 * Math.Max(hvv, isSel ? 1 : 0)), 10, 9, 12))) g.FillPath(b, path);
-                    Badge(g, "⬇ " + L.T("NICHT INSTALLIERT"), UI.Orange, rr.X + UI.S(12), rr.Y + UI.S(12));
+                    float nbw = Badge(g, "⬇ " + L.T("NICHT INSTALLIERT"), UI.Orange, rr.X + UI.S(12), rr.Y + UI.S(12));
+                    if (p.IsNew) Badge(g, "\u2726 " + L.T("NEU"), UI.Green, rr.X + UI.S(18) + nbw, rr.Y + UI.S(12));
                 }
                 if (canPeek) EyeButton(g, er, ev, hvv);
             }
@@ -994,16 +1000,18 @@ namespace DbdCustom
             using (var f = UI.F(9.5f, FontStyle.Bold)) UI.Txt(g, "＋  " + L.T("Packs-Ordner öffnen"), f, UI.Sub, rb, StringAlignment.Center);
         }
 
-        void Badge(Graphics g, string s, Color c, float x, float y)
+        float Badge(Graphics g, string s, Color c, float x, float y)
         {
+            float bw = 0;
             using (var f = UI.F(8f, FontStyle.Bold))
             {
                 var sz = g.MeasureString(s, f); var r = new RectangleF(x, y, sz.Width + UI.S(22), UI.S(22));
                 using (var path = UI.Round(r, r.Height / 2)) using (var b = new SolidBrush(Color.FromArgb(220, 10, 12, 10))) g.FillPath(b, path);
                 using (var path = UI.Round(r, r.Height / 2)) using (var pen = new Pen(UI.A(c, 200), UI.Sf(1.2f))) g.DrawPath(pen, path);
                 using (var b = new SolidBrush(c)) g.FillEllipse(b, r.X + UI.S(8), r.Y + r.Height / 2 - UI.S(3), UI.S(6), UI.S(6));
-                UI.Txt(g, s, f, c, new RectangleF(r.X + UI.S(16), r.Y, r.Width - UI.S(16), r.Height));
+                bw = r.Width; UI.Txt(g, s, f, c, new RectangleF(r.X + UI.S(16), r.Y, r.Width - UI.S(16), r.Height));
             }
+            return bw;
         }
 
         void DrawMain(Graphics g, int W, int H)
@@ -1090,9 +1098,20 @@ namespace DbdCustom
             if (sel != null)
             {
                 var list = Cats.Where(c => sel.Counts.ContainsKey(c)).ToList();
-                int chosen = list.Where(c => useCats.Contains(c)).Sum(c => sel.Counts[c]), total = list.Sum(c => sel.Counts[c]);
+                Func<string, int> cnt = c => { var sp = sel.Available ? sel : (SourceFor(sel, c) ?? sel); int v; return sp.Counts.TryGetValue(c, out v) ? v : 0; };
+                int chosen = list.Where(c => useCats.Contains(c)).Sum(c => cnt(c)), total = list.Sum(c => cnt(c));
                 bool allOn = list.All(c => useCats.Contains(c));
-                using (var f = UI.F(8.5f, FontStyle.Bold)) UI.Txt(g, L.T("INHALT"), f, UI.Dim, new RectangleF(x0 + UI.S(2), gy, UI.S(120), UI.S(20)));
+                float ilw; using (var f = UI.F(8.5f, FontStyle.Bold)) { ilw = g.MeasureString(L.T("INHALT"), f).Width; UI.Txt(g, L.T("INHALT"), f, UI.Dim, new RectangleF(x0 + UI.S(2), gy, UI.S(120), UI.S(20))); }
+                int novs = ActiveOv().Count();
+                if (novs > 0 && !sel.Available)
+                {
+                    string ot = "\u2605 " + L.F("{0} Einzel-Icons", novs); float ow; using (var f = UI.F(8.5f, FontStyle.Bold)) ow = g.MeasureString(ot, f).Width + UI.S(18);
+                    var orr = new RectangleF(x0 + ilw + UI.S(14), gy - UI.S(2), ow, UI.S(22));
+                    AddHot("ov", orr, () => { var m = new PopupMenu(); m.Add("\u2605", L.F("Einzel-Icons zurücksetzen ({0})", iconOv.Count), ResetOverrides, !busy); m.ShowAt(this, PointToScreen(new Point((int)orr.Right, (int)orr.Bottom + UI.S(6)))); }, !busy, L.T("Einzeln gewählte Icons aus anderen Packs – sie werden beim Aktivieren mit übernommen."));
+                    float ho = Hv("ov");
+                    using (var path = UI.Round(orr, orr.Height / 2)) { using (var b = new SolidBrush(UI.A(UI.Orange, (int)(30 + 30 * ho)))) g.FillPath(b, path); using (var pen = new Pen(UI.A(UI.Orange, 150))) g.DrawPath(pen, path); }
+                    using (var f = UI.F(8.5f, FontStyle.Bold)) UI.Txt(g, ot, f, UI.Mix(UI.Orange, Color.White, 0.3f), orr, StringAlignment.Center);
+                }
                 string allTxt = allOn ? L.T("Alle abwählen") : L.T("Alle auswählen");
                 float atw; using (var f = UI.F(9f, FontStyle.Bold)) atw = g.MeasureString(allTxt, f).Width + UI.S(20);
                 var ar = new RectangleF((float)Math.Round(x0 + w - atw), gy - UI.S(4), (float)Math.Round(atw), UI.S(26));
@@ -1126,7 +1145,24 @@ namespace DbdCustom
                     using (var b = new SolidBrush(Color.FromArgb(40, 0, 0, 0))) g.FillEllipse(b, kx, sr.Y + UI.S(3), UI.S(16), UI.S(16));
                     using (var b = new SolidBrush(UI.Mix(Color.FromArgb(215, 215, 220), Color.White, e))) g.FillEllipse(b, kx, sr.Y + UI.S(2), UI.S(16), UI.S(16));
                     using (var f = UI.F(10f, FontStyle.Bold)) UI.Txt(g, L.T(CatNames[c]), f, on ? UI.Text : UI.Sub, new RectangleF(tr.X + UI.S(14), tr.Y + UI.S(6), tw - UI.S(70), UI.S(20)));
-                    using (var f = UI.F(8.5f)) UI.Txt(g, L.F("{0} Icons", sel.Counts[c].ToString("N0")), f, on ? UI.Sub : UI.Dim, new RectangleF(tr.X + UI.S(14), tr.Y + UI.S(25), tw - UI.S(70), UI.S(17)));
+                    string ctx = L.F("{0} Icons", cnt(c).ToString("N0")); float ctw;
+                    using (var f = UI.F(8.5f)) { ctw = g.MeasureString(ctx, f).Width; UI.Txt(g, ctx, f, on ? UI.Sub : UI.Dim, new RectangleF(tr.X + UI.S(14), tr.Y + UI.S(25), tw - UI.S(70), UI.S(17))); }
+                    // Mischen: Quelle der Kategorie wählen (nur wenn mehrere installierte Packs sie haben)
+                    if (!sel.Available && packs.Count(x => !x.Available && x.Counts.ContainsKey(c)) >= 2)
+                    {
+                        var sp = SourceFor(sel, c) ?? sel; bool mixed = sp != sel;
+                        string chip = (mixed ? "\u21C4 " : "") + sp.Name + " \u25BE";
+                        float cw2; using (var f = UI.F(7.5f, FontStyle.Bold)) cw2 = Math.Min(g.MeasureString(chip, f).Width + UI.S(12), tw - UI.S(84) - ctw);
+                        if (cw2 > UI.S(30))
+                        {
+                            var crr = new RectangleF(tr.X + UI.S(14) + ctw + UI.S(4), tr.Y + UI.S(25), cw2, UI.S(17));
+                            AddHot("src:" + c, crr, () => ShowSourceMenu(cc, crr), !busy, L.T("Aus welchem Pack diese Kategorie kommt – zum Mischen klicken"));
+                            float hs = Hv("src:" + c); var ccol = mixed ? UI.Orange : UI.Sub;
+                            using (var path = UI.Round(crr, crr.Height / 2)) { using (var b = new SolidBrush(UI.A(ccol, (int)((mixed ? 40 : 18) + 40 * hs)))) g.FillPath(b, path); using (var pen = new Pen(UI.A(ccol, (int)(90 + 80 * hs)))) g.DrawPath(pen, path); }
+                            using (var f = UI.F(7.5f, FontStyle.Bold)) using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
+                            using (var b = new SolidBrush(mixed ? UI.Mix(UI.Orange, Color.White, 0.3f) : UI.Text)) g.DrawString(chip, f, b, crr, sf);
+                        }
+                    }
                 }
                 gy += ((list.Count + cols - 1) / cols) * (th + gap) - gap;
             }
@@ -1138,13 +1174,13 @@ namespace DbdCustom
             if (busy) { label = L.T("BITTE WARTEN …"); acc = Color.FromArgb(70, 68, 78); }
             else if (sel == null) { label = L.T("KEIN PACK"); acc = Color.FromArgb(70, 68, 78); }
             else if (sel.Available) { label = "⬇   " + L.T("INSTALLIEREN"); acc = UI.Red; }
-            else if (isActive && CatsChanged(sel)) { label = "⟳   " + L.T("ÄNDERUNGEN ÜBERNEHMEN"); acc = UI.Red; }
+            else if (isActive && PlanChanged(sel)) { label = "⟳   " + L.T("ÄNDERUNGEN ÜBERNEHMEN"); acc = UI.Red; }
             else if (isActive) { label = "■   " + L.T("ENTLADEN"); acc = UI.Orange; }
             else if (active != null) { label = "⇄   " + L.F("ZU „{0}“ WECHSELN", sel.Name.ToUpperInvariant()); acc = UI.Red; }
             else { label = "▶   " + L.T("AKTIVIEREN"); acc = UI.Red; }
             float mw = UI.S(340);   // feste Breite – der Knopf bewegt sich nie
             var mr = new RectangleF(x0, by, mw, bh); mainRect = mr;
-            bool canMain = !busy && sel != null && (sel.Available || (gamePath != null && (isActive || PackCats(sel).Any())));
+            bool canMain = !busy && sel != null && (sel.Available || (gamePath != null && (isActive || PlanCats(sel).Any())));
             AddHot("main", mr, DoMainAction, canMain);
             float hmv = Hv("main");
             using (var path = UI.Round(mr, bh / 2))
@@ -1327,7 +1363,8 @@ namespace DbdCustom
         }
         // ---------------- Programm-Update über GitHub ----------------
         Remote.AppUpdate appUpd; RectangleF updRect; Timer updTimer;
-        void CheckAppUpdate()
+        void CheckAppUpdate() { CheckAppUpdate(false); }
+        void CheckAppUpdate(bool manual)
         {
             new System.Threading.Thread(() =>
             {
@@ -1336,9 +1373,11 @@ namespace DbdCustom
                     var u = Remote.CheckAppUpdate(15000);
                     if (u != null && !string.IsNullOrEmpty(u.Url)) BeginInvoke((Action)(() =>
                     {
+                        if (appUpd != null && appUpd.Version.CompareTo(u.Version) >= 0) return;
                         appUpd = u; Log(L.F("FogForge {0} ist verfügbar.", u.Version.ToString(3))); Invalidate();
-                        updTimer = new Timer { Interval = 40 }; updTimer.Tick += (s, e) => { if (updRect.Width > 0 && WindowState != FormWindowState.Minimized) Inv(updRect, 4); }; updTimer.Start();
+                        if (updTimer == null) { updTimer = new Timer { Interval = 40 }; updTimer.Tick += (s, e) => { if (updRect.Width > 0 && WindowState != FormWindowState.Minimized) Inv(updRect, 4); }; updTimer.Start(); }
                     }));
+                    else if (manual) BeginInvoke((Action)(() => { if (appUpd == null) Log(L.T("FogForge ist auf dem neuesten Stand.")); }));
                 }
                 catch { }
             }) { IsBackground = true }.Start();
@@ -1392,13 +1431,28 @@ namespace DbdCustom
                 foreach (var c in Cats)
                 {
                     var cd = Path.Combine(d, c);
-                    if (Directory.Exists(cd)) { int n = Directory.GetFiles(cd, "*.png", SearchOption.AllDirectories).Length; if (n > 0) p.Counts[c] = n; }
+                    if (Directory.Exists(cd)) { int n = Directory.GetFiles(cd, "*.png", SearchOption.AllDirectories).Count(f => !Remote.IsPlaceholder(f)); if (n > 0) p.Counts[c] = n; }
                 }
                 if (p.Counts.Count == 0) continue;
                 p.Rem = Rem(p.Name); p.Update = p.Rem != null && Remote.NeedsUpdate(d, p.Rem);
                 p.Preview = LoadPreview(p); packs.Add(p);
             }
             var def = packs.FirstOrDefault(x => x.Name.Equals("Default", StringComparison.OrdinalIgnoreCase));
+            // altes Installer-Banner mit Spielfiguren durch das neue ersetzen
+            if (def != null)
+                try
+                {
+                    var pf = Path.Combine(def.Dir, "preview.jpg");
+                    if (!File.Exists(pf) || new FileInfo(pf).Length == 163633)
+                        using (var st = typeof(MainForm).Assembly.GetManifestResourceStream("banner.jpg"))
+                            if (st != null)
+                            {
+                                if (def.Preview != null) def.Preview.Dispose();
+                                using (var o = File.Create(pf)) st.CopyTo(o);
+                                def.Preview = LoadPreview(def); def.Card = null; def.Backdrop = null; def.Hero = null;
+                            }
+                }
+                catch { }
             if (def != null) { packs.Remove(def); packs.Insert(0, def); }
             // Verfügbare (noch nicht installierte) Packs aus dem Installer bzw. gewählten Pack-Dateien
             var seen = new HashSet<string>(packs.Select(x => x.Name), StringComparer.OrdinalIgnoreCase);
@@ -1407,7 +1461,7 @@ namespace DbdCustom
                 {
                     var ap = new Pack { Name = Path.GetFileName(d), Dir = Path.Combine(packsDir, Path.GetFileName(d)), Available = true, SourceDir = d };
                     if (seen.Contains(ap.Name)) continue;
-                    foreach (var c in Cats) { var cd = Path.Combine(d, c); if (Directory.Exists(cd)) { int n = Directory.GetFiles(cd, "*.png", SearchOption.AllDirectories).Length; if (n > 0) ap.Counts[c] = n; } }
+                    foreach (var c in Cats) { var cd = Path.Combine(d, c); if (Directory.Exists(cd)) { int n = Directory.GetFiles(cd, "*.png", SearchOption.AllDirectories).Count(f => !Remote.IsPlaceholder(f)); if (n > 0) ap.Counts[c] = n; } }
                     if (ap.Counts.Count == 0) continue;
                     var tmp = new Pack { Dir = d }; ap.Preview = LoadPreview(tmp);
                     seen.Add(ap.Name); packs.Add(ap);
@@ -1420,6 +1474,17 @@ namespace DbdCustom
                 if (ap.Counts.Count == 0) continue;
                 ap.Preview = Remote.LoadPreview(rp, cacheDir, false);
                 seen.Add(ap.Name); packs.Add(ap);
+            }
+            // „NEU“: Packs, die es beim letzten Mal noch nicht gab
+            if (catalog.Count > 0)
+            {
+                if (this.seen == null) try { if (File.Exists(SeenFile)) this.seen = new HashSet<string>(File.ReadAllLines(SeenFile), StringComparer.OrdinalIgnoreCase); } catch { }
+                if (this.seen == null)
+                {
+                    this.seen = new HashSet<string>(catalog.Select(r => r.Name).Concat(packs.Select(x => x.Name)), StringComparer.OrdinalIgnoreCase);
+                    try { Directory.CreateDirectory(Path.GetDirectoryName(SeenFile)); File.WriteAllLines(SeenFile, this.seen.ToArray()); } catch { }
+                }
+                foreach (var pk in packs) pk.IsNew = pk.Available && pk.Rem != null && !this.seen.Contains(pk.Name);
             }
             foreach (var src in PackSources())
                 foreach (var pi in src.Packs.OrderBy(x => PackOrder(x.Name)).ThenBy(x => x.Name))
@@ -1488,7 +1553,7 @@ namespace DbdCustom
         void SelectPack(Pack p, bool animate = true)
         {
             if (p == sel) return;
-            sel = p; if (anim != null) anim.Start();
+            sel = p; MarkSeen(p); if (anim != null) anim.Start();
             if (p != null && p.Preview != null && (p.Backdrop == null || p.Backdrop.Size != ClientSize)) { if (p.Backdrop != null) p.Backdrop.Dispose(); p.Backdrop = UI.Blur(p.Preview, ClientSize, 150); }
             StartWarm();
             Invalidate();
@@ -1549,7 +1614,15 @@ namespace DbdCustom
             catch { }
         }
         string langSetting = "auto";
-        void SaveGamePath() { try { File.WriteAllText(settingsFile, "GamePath=" + gamePath + Environment.NewLine + "Categories=" + string.Join(",", Cats.Where(c => useCats.Contains(c))) + Environment.NewLine + "Language=" + langSetting + Environment.NewLine); } catch { } }
+        void SaveGamePath()
+        {
+            try
+            {
+                File.WriteAllText(settingsFile, "GamePath=" + gamePath + Environment.NewLine + "Categories=" + string.Join(",", Cats.Where(c => useCats.Contains(c))) + Environment.NewLine + "Language=" + langSetting + Environment.NewLine
+                    + "Mix=" + string.Join(";", mix.Select(kv => kv.Key + ":" + kv.Value)) + Environment.NewLine + "AutoReapply=" + (autoReapply ? "1" : "0") + Environment.NewLine);
+            }
+            catch { }
+        }
         void LoadLang()
         {
             try
@@ -1583,11 +1656,183 @@ namespace DbdCustom
             try
             {
                 if (!File.Exists(settingsFile)) return;
-                var l = File.ReadAllLines(settingsFile).FirstOrDefault(x => x.StartsWith("Categories="));
+                var all = File.ReadAllLines(settingsFile);
+                var l = all.FirstOrDefault(x => x.StartsWith("Categories="));
                 if (l != null) useCats = new HashSet<string>(l.Substring(11).Split(',').Where(c => Cats.Contains(c)));
+                var mx = all.FirstOrDefault(x => x.StartsWith("Mix="));
+                if (mx != null) foreach (var part in mx.Substring(4).Split(';')) { var kv = part.Split(':'); if (kv.Length == 2 && Cats.Contains(kv[0]) && kv[1].Length > 0) mix[kv[0]] = kv[1]; }
+                var ar = all.FirstOrDefault(x => x.StartsWith("AutoReapply="));
+                if (ar != null) autoReapply = ar.Substring(12).Trim() == "1";
             }
             catch { }
         }
+        // ---------------- Mix + Einzel-Icons ----------------
+        Dictionary<string, string> mix = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);       // Kategorie -> Pack
+        Dictionary<string, string> iconOv = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);    // Icon-Pfad -> Pack
+        bool autoReapply;
+        string OvFile { get { return Path.Combine(baseDir, "icon_overrides.txt"); } }
+        void LoadOv()
+        {
+            iconOv.Clear();
+            try { if (File.Exists(OvFile)) foreach (var l in File.ReadAllLines(OvFile)) { var p = l.Split('|'); if (p.Length == 2 && p[0].Length > 0 && p[1].Length > 0) iconOv[p[0].Replace('/', '\\')] = p[1]; } } catch { }
+        }
+        void SaveOv() { try { File.WriteAllLines(OvFile, iconOv.Select(kv => kv.Key + "|" + kv.Value).ToArray()); } catch { } }
+        string GetOv(string rel) { string v; return iconOv.TryGetValue(rel.Replace('/', '\\'), out v) ? v : null; }
+        void SetOv(string rel, string pack)
+        {
+            rel = rel.Replace('/', '\\');
+            if (pack == null) iconOv.Remove(rel); else iconOv[rel] = pack;
+            SaveOv(); if (!IsDisposed) Invalidate();
+        }
+        void ResetOverrides()
+        {
+            if (DarkDialog.Ask(this, L.T("Einzel-Icons zurücksetzen"), L.F("Alle {0} einzeln gewählten Icons zurücksetzen?", iconOv.Count), UI.Orange, L.T("Zurücksetzen"), L.T("Abbrechen")) != 0) return;
+            iconOv.Clear(); SaveOv(); Invalidate();
+        }
+        Pack FindInstalled(string name) { return packs.FirstOrDefault(p => !p.Available && p.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && Directory.Exists(p.Dir)); }
+        // Aus welchem Pack kommt eine Kategorie? (Mix hat Vorrang, sonst das gewählte Pack)
+        Pack SourceFor(Pack basePack, string cat)
+        {
+            string m; if (mix.TryGetValue(cat, out m)) { var pk = FindInstalled(m); if (pk != null && pk.Counts.ContainsKey(cat)) return pk; }
+            return basePack != null && basePack.Counts.ContainsKey(cat) ? basePack : null;
+        }
+        List<string> PlanCats(Pack basePack) { return Cats.Where(c => useCats.Contains(c) && SourceFor(basePack, c) != null).ToList(); }
+        IEnumerable<KeyValuePair<string, string>> ActiveOv() { return iconOv.Where(kv => useCats.Contains(kv.Key.Split('\\')[0]) && FindInstalled(kv.Value) != null); }
+        Dictionary<string, string> BuildPlan(Pack basePack)
+        {
+            var plan = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var c in PlanCats(basePack))
+            {
+                var src = SourceFor(basePack, c); var d = Path.Combine(src.Dir, c);
+                if (!Directory.Exists(d)) continue;
+                foreach (var f in Directory.GetFiles(d, "*.png", SearchOption.AllDirectories)) plan[f.Substring(src.Dir.Length + 1)] = f;
+            }
+            foreach (var kv in ActiveOv().ToList()) { var f = Path.Combine(FindInstalled(kv.Value).Dir, kv.Key); if (File.Exists(f)) plan[kv.Key] = f; }
+            return plan;
+        }
+        string PlanSig(Pack basePack)
+        {
+            return basePack.Name + "|" + string.Join(",", PlanCats(basePack).Select(c => c + "=" + SourceFor(basePack, c).Name)) + "|" + string.Join(";", ActiveOv().OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase).Select(kv => kv.Key + "=" + kv.Value));
+        }
+        string PlanFile { get { return Path.Combine(backupDir, "active_plan.txt"); } }
+        string AppliedFile { get { return Path.Combine(backupDir, "applied_files.txt"); } }
+        bool PlanChanged(Pack p)
+        {
+            if (!File.Exists(PlanFile)) return CatsChanged(p);
+            try { return File.ReadAllText(PlanFile).Trim() != PlanSig(p); } catch { return false; }
+        }
+        void ShowSourceMenu(string cat, RectangleF r)
+        {
+            if (busy || sel == null) return;
+            var cur = SourceFor(sel, cat) ?? sel;
+            var m = new PopupMenu();
+            foreach (var p in packs.Where(x => !x.Available && x.Counts.ContainsKey(cat)).ToList())
+            {
+                var pk = p;
+                m.Add(p == cur ? "●" : "○", p == sel ? L.F("{0} (ausgewähltes Pack)", p.Name) : p.Name, () =>
+                {
+                    if (pk == sel) mix.Remove(cat); else mix[cat] = pk.Name;
+                    SaveGamePath(); Invalidate(); anim.Start();
+                });
+            }
+            m.ShowAt(this, PointToScreen(new Point((int)r.Right, (int)r.Bottom + UI.S(6))));
+        }
+
+        // ---------------- Nach Spiel-Updates erneut anwenden ----------------
+        DateTime lastDriftCheck = DateTime.MinValue; int driftDismissed = -1; bool driftAsking;
+        Dictionary<string, string> ReadApplied()
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try { if (File.Exists(AppliedFile)) foreach (var l in File.ReadAllLines(AppliedFile)) { var p = l.Split('\t'); if (p.Length == 2) map[p[0]] = p[1]; } } catch { }
+            return map;
+        }
+        List<string> FindDrift(string game)
+        {
+            var res = new List<string>();
+            if (game == null || !Directory.Exists(game)) return res;
+            foreach (var kv in ReadApplied())
+            {
+                try
+                {
+                    var src = new FileInfo(kv.Value); if (!src.Exists) continue;
+                    var dst = new FileInfo(Path.Combine(game, kv.Key));
+                    if (!dst.Exists || dst.Length != src.Length) res.Add(kv.Key);
+                }
+                catch { }
+            }
+            return res;
+        }
+        static bool GameRunning() { return Process.GetProcesses().Any(p => { try { return p.ProcessName.StartsWith("DeadByDaylight", StringComparison.OrdinalIgnoreCase); } catch { return false; } }); }
+        void CheckDrift()
+        {
+            if (busy || driftAsking || ActivePack() == null || gamePath == null) return;
+            lastDriftCheck = DateTime.Now; string game = gamePath;
+            new System.Threading.Thread(() =>
+            {
+                List<string> drift; try { drift = FindDrift(game); } catch { return; }
+                if (drift.Count == 0 || GameRunning()) return;
+                try { BeginInvoke((Action)(() => OnDrift(drift))); } catch { }
+            }) { IsBackground = true }.Start();
+        }
+        void OnDrift(List<string> drift)
+        {
+            if (busy || driftAsking) return;
+            string pack = ActivePack(); if (pack == null) return;
+            if (autoReapply) { Reapply(drift); return; }
+            if (drift.Count == driftDismissed) return;
+            driftAsking = true;
+            int r = DarkDialog.Ask(this, L.T("Spiel wurde aktualisiert"),
+                L.F("Dead by Daylight wurde aktualisiert und hat dabei {0} Icons von „{1}“ zurückgesetzt.\nSollen sie wieder eingespielt werden?", drift.Count.ToString("N0"), pack),
+                UI.Red, L.T("Jetzt erneut anwenden"), L.T("Immer automatisch"), L.T("Später"));
+            driftAsking = false;
+            if (r == 1) { autoReapply = true; SaveGamePath(); }
+            if (r == 0 || r == 1) Reapply(drift); else driftDismissed = drift.Count;
+        }
+        void Reapply(List<string> drift)
+        {
+            if (busy || gamePath == null) return;
+            var applied = ReadApplied(); string game = gamePath, pack = ActivePack(); int n = 0;
+            Run(L.T("Pack wird erneut angewendet …"), bw =>
+            {
+                var orig = Path.Combine(backupDir, "Original");
+                var added = new HashSet<string>(File.Exists(AddedFile) ? File.ReadAllLines(AddedFile) : new string[0], StringComparer.OrdinalIgnoreCase);
+                for (int i = 0; i < drift.Count; i++)
+                {
+                    string rel = drift[i], src; if (!applied.TryGetValue(rel, out src) || !File.Exists(src)) continue;
+                    var dst = Path.Combine(game, rel); var bak = Path.Combine(orig, rel);
+                    // das Spiel-Update hat ggf. neue Originale mitgebracht -> diese sichern
+                    if (File.Exists(dst) && !added.Contains(rel)) { Directory.CreateDirectory(Path.GetDirectoryName(bak)); File.Copy(dst, bak, true); }
+                    Directory.CreateDirectory(Path.GetDirectoryName(dst)); File.Copy(src, dst, true); n++;
+                    if (i % 25 == 0) bw.ReportProgress(i * 100 / Math.Max(1, drift.Count), L.F("„{0}“ wird erneut angewendet … {1} / {2}", pack, i + 1, drift.Count));
+                }
+            }, () => { driftDismissed = -1; Log(L.F("„{0}“ wurde nach dem Spiel-Update erneut angewendet ({1} Icons).", pack, n.ToString("N0"))); }, "Fertig – das Pack ist im Spiel");
+        }
+
+        // ---------------- Updates im laufenden Betrieb ----------------
+        DateTime lastOnlineCheck = DateTime.Now; Timer periodic;
+        void CheckNow(bool manual)
+        {
+            lastOnlineCheck = DateTime.Now;
+            FetchCatalog(); CheckAppUpdate(manual); CheckDrift();
+        }
+        protected override void OnActivated(EventArgs e)
+        {
+            base.OnActivated(e);
+            if (busy) return;
+            if ((DateTime.Now - lastOnlineCheck).TotalMinutes >= 10) CheckNow(false);
+            else if ((DateTime.Now - lastDriftCheck).TotalMinutes >= 2) CheckDrift();
+        }
+
+        // ---------------- „NEU“-Markierung ----------------
+        HashSet<string> seen;
+        string SeenFile { get { return Path.Combine(cacheDir ?? baseDir, "seen.txt"); } }
+        void MarkSeen(Pack p)
+        {
+            if (p == null || !p.IsNew || seen == null) return;
+            p.IsNew = false; seen.Add(p.Name);
+            try { Directory.CreateDirectory(Path.GetDirectoryName(SeenFile)); File.WriteAllLines(SeenFile, seen.ToArray()); } catch { }
+        }
+
         string CatsFile { get { return Path.Combine(backupDir, "active_categories.txt"); } }
         HashSet<string> LoadedCats() { if (!stateKnown) RefreshState(); return stateCats; }
         IEnumerable<string> PackCats(Pack p) { return Cats.Where(c => p.Counts.ContainsKey(c) && useCats.Contains(c)); }
@@ -1717,47 +1962,50 @@ namespace DbdCustom
             if (File.Exists(AddedFile)) File.Delete(AddedFile);
             if (File.Exists(StateFile)) File.Delete(StateFile);
             if (File.Exists(CatsFile)) File.Delete(CatsFile);
+            if (File.Exists(PlanFile)) File.Delete(PlanFile);
+            if (File.Exists(AppliedFile)) File.Delete(AppliedFile);
         }
 
-        void ImportCore(BackgroundWorker bw, Pack pack, string game, int pFrom, int pTo, ref int copied, ref int backed)
+        void ImportCore(BackgroundWorker bw, Pack pack, Dictionary<string, string> plan, string sig, List<string> cats, string game, int pFrom, int pTo, ref int copied, ref int backed)
         {
             var orig = Path.Combine(backupDir, "Original"); Directory.CreateDirectory(orig);
             var added = new HashSet<string>(File.Exists(AddedFile) ? File.ReadAllLines(AddedFile) : new string[0], StringComparer.OrdinalIgnoreCase);
-            var files = new List<string>();
-            var cats = PackCats(pack).ToList();
-            foreach (var c in cats) files.AddRange(Directory.GetFiles(Path.Combine(pack.Dir, c), "*.png", SearchOption.AllDirectories));
-            for (int i = 0; i < files.Count; i++)
+            var items = plan.ToList();
+            for (int i = 0; i < items.Count; i++)
             {
-                var rel = files[i].Substring(pack.Dir.Length + 1); var dst = Path.Combine(game, rel); var bak = Path.Combine(orig, rel);
+                var rel = items[i].Key; var dst = Path.Combine(game, rel); var bak = Path.Combine(orig, rel);
                 if (File.Exists(dst)) { if (!File.Exists(bak) && !added.Contains(rel)) { Directory.CreateDirectory(Path.GetDirectoryName(bak)); File.Copy(dst, bak); backed++; } }
                 else if (!File.Exists(bak)) added.Add(rel);
-                Directory.CreateDirectory(Path.GetDirectoryName(dst)); File.Copy(files[i], dst, true); copied++;
-                if (i % 25 == 0) bw.ReportProgress(pFrom + i * (pTo - pFrom) / Math.Max(1, files.Count), L.F("„{0}“ wird geladen … {1} / {2}", pack.Name, i + 1, files.Count));
+                Directory.CreateDirectory(Path.GetDirectoryName(dst)); File.Copy(items[i].Value, dst, true); copied++;
+                if (i % 25 == 0) bw.ReportProgress(pFrom + i * (pTo - pFrom) / Math.Max(1, items.Count), L.F("„{0}“ wird geladen … {1} / {2}", pack.Name, i + 1, items.Count));
             }
             File.WriteAllLines(AddedFile, added.ToArray());
             File.WriteAllText(StateFile, pack.Name);
             File.WriteAllText(CatsFile, string.Join(",", cats));
+            File.WriteAllText(PlanFile, sig);
+            File.WriteAllLines(AppliedFile, items.Select(kv => kv.Key + "\t" + kv.Value).ToArray());
         }
 
         void DoMainAction()
         {
             if (sel == null || busy) return;
             if (sel.Available) { DoInstallPack(sel); return; }
-            if (sel.Name == ActivePack() && !CatsChanged(sel)) DoUnload(); else DoActivate();
+            if (sel.Name == ActivePack() && !PlanChanged(sel)) DoUnload(); else DoActivate();
         }
 
         void DoActivate()
         {
             string old = ActivePack();
-            if (!PackCats(sel).Any()) { DarkDialog.Info(this, L.T("Nichts ausgewählt"), L.T("Bitte mindestens eine Kategorie anhaken.")); return; }
+            if (!PlanCats(sel).Any()) { DarkDialog.Info(this, L.T("Nichts ausgewählt"), L.T("Bitte mindestens eine Kategorie anhaken.")); return; }
             if (!CheckGameClosed()) return;
             var pack = sel; string game = gamePath; bool hadBackup = AnyActive();
+            var plan = BuildPlan(pack); var sig = PlanSig(pack); var pcats = PlanCats(pack);
             int copied = 0, backed = 0, restored = 0, removed = 0;
             Log(old != null ? L.F("Wechsle von „{0}“ zu „{1}“ …", old, pack.Name) : L.F("Aktiviere „{0}“ …", pack.Name));
             Run(old != null ? L.F("Wechsle zu „{0}“ …", pack.Name) : L.F("„{0}“ wird geladen …", pack.Name), bw =>
             {
                 if (hadBackup) RestoreCore(bw, game, 0, 40, ref restored, ref removed);
-                ImportCore(bw, pack, game, hadBackup ? 40 : 0, 100, ref copied, ref backed);
+                ImportCore(bw, pack, plan, sig, pcats, game, hadBackup ? 40 : 0, 100, ref copied, ref backed);
             }, () => Log(old != null ? L.F("„{0}“ ist aktiv – {1} Icons im Spiel, „{2}“ entladen.", pack.Name, copied.ToString("N0"), old) : L.F("„{0}“ ist aktiv – {1} Icons im Spiel.", pack.Name, copied.ToString("N0"))), "Fertig – das Pack ist im Spiel");
         }
 
@@ -1882,7 +2130,7 @@ namespace DbdCustom
     // ============================================================ Pack-Vorschau
     class PackPreview : Form
     {
-        class Item { public string Name, File, TFile, Show, Key; public char Kind; public Remote.ZEntry E, TE; public Bitmap Thumb; public bool Queued, Failed, Visible; }
+        class Item { public string Name, File, TFile, Show, Key, Rel; public char Kind; public Remote.ZEntry E, TE; public Bitmap Thumb; public bool Queued, Failed, Visible; }
         static readonly string[] Prefixes = { "T_UI_", "iconsPerks_", "iconPerks_", "iconAddons_", "iconAddon_", "iconItems_", "iconsFavors_", "iconFavors_", "iconsPowers_", "iconPowers_", "icons_", "icon_" };
         static Item MakeItem(string name)
         {
@@ -1901,19 +2149,20 @@ namespace DbdCustom
         [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, string l);
         static bool Placeholder(string name, string path)
         {
-            var p = (path ?? "").Replace('\\', '/');
-            return Regex.IsMatch(name, @"^(Missing\d*|empty)$", RegexOptions.IgnoreCase) || name.IndexOf("PowerTemp", StringComparison.OrdinalIgnoreCase) >= 0 || p.IndexOf("/Missing/", StringComparison.OrdinalIgnoreCase) >= 0;
+            return Remote.IsPlaceholder(path ?? name);
         }
-        readonly string pack, localDir, peekDir; readonly Remote.RPack rem;
+        readonly string pack, localDir, peekDir, defaultDir; readonly Remote.RPack rem; readonly bool installed; readonly Func<string, string> getOv; readonly Action<string, string> setOv;
+        Bitmap zoomOrig; float split = 0.5f; bool dragging; RectangleF zoomR, useR; bool overUse;
         readonly List<string> cats = new List<string>(); readonly Dictionary<string, List<Item>> items = new Dictionary<string, List<Item>>();
         int cat, kindSel; float scroll, scrollTarget; TextBox search; string query = ""; List<RectangleF> kindR = new List<RectangleF>(); int overKind = -1; RectangleF searchR; bool listing = true, listFail, closing; Item hover, zoom; Bitmap zoomImg;
         List<RectangleF> tabR = new List<RectangleF>(); RectangleF closeR; int overTab = -1; bool overClose;
         readonly List<Item> queue = new List<Item>(); readonly object qlock = new object(); volatile bool dirty; Timer tick;
         const int Cell = 118, CellH = 140, Thumb = 100;
 
-        public PackPreview(string pack, string localDir, Remote.RPack rem, string cacheDir)
+        public PackPreview(string pack, string localDir, Remote.RPack rem, string cacheDir, bool installed, string defaultDir, Func<string, string> getOv, Action<string, string> setOv)
         {
-            this.pack = pack; this.localDir = localDir; this.rem = localDir == null ? rem : null;
+            this.pack = pack; this.localDir = localDir; this.rem = localDir == null ? rem : null; this.installed = installed && localDir != null; this.getOv = getOv; this.setOv = setOv;
+            this.defaultDir = pack.Equals("Default", StringComparison.OrdinalIgnoreCase) ? null : defaultDir;
             if (this.rem != null) { var st = rem.Stamp ?? "v"; peekDir = Path.Combine(cacheDir ?? Path.GetTempPath(), "peek", pack + "-" + new string(st.Where(char.IsLetterOrDigit).Take(12).ToArray())); }
             FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; StartPosition = FormStartPosition.CenterParent;
             BackColor = Color.FromArgb(16, 15, 20); Size = new Size(UI.S(1040), UI.S(700)); Text = pack + " – " + L.T("Vorschau");
@@ -1967,7 +2216,7 @@ namespace DbdCustom
                     foreach (var c in MainForm.Cats)
                     {
                         var d = Path.Combine(localDir, c); if (!Directory.Exists(d)) continue;
-                        var l = Directory.GetFiles(d, "*.png", SearchOption.AllDirectories).OrderBy(f => f, StringComparer.OrdinalIgnoreCase).Select(f => { var it = MakeItem(Path.GetFileNameWithoutExtension(f)); it.File = f; return it; }).Where(it => !Placeholder(it.Name, it.File)).OrderBy(it => it.Key, StringComparer.Ordinal).ToList();
+                        var l = Directory.GetFiles(d, "*.png", SearchOption.AllDirectories).OrderBy(f => f, StringComparer.OrdinalIgnoreCase).Select(f => { var it = MakeItem(Path.GetFileNameWithoutExtension(f)); it.File = f; it.Rel = f.Substring(localDir.Length + 1); return it; }).Where(it => !Placeholder(it.Name, it.File)).OrderBy(it => it.Key, StringComparer.Ordinal).ToList();
                         if (l.Count > 0) res[c] = l;
                     }
                 }
@@ -1984,7 +2233,7 @@ namespace DbdCustom
                         var nm = en.Name.Substring(en.Name.LastIndexOf('/') + 1);
                         var it = MakeItem(nm.Substring(0, nm.Length - 4)); if (Placeholder(it.Name, en.Name)) continue;
                         var safe = new string(en.Name.Select(ch => char.IsLetterOrDigit(ch) || ch == '_' || ch == '.' || ch == '-' ? ch : '_').ToArray());
-                        it.E = en; it.File = Path.Combine(peekDir, safe);
+                        it.E = en; it.File = Path.Combine(peekDir, safe); it.Rel = en.Name.Substring(en.Name.IndexOf('/') + 1).Replace('/', '\\');
                         Remote.ZEntry tz; if (thumbs.TryGetValue(en.Name, out tz)) { it.TE = tz; it.TFile = Path.Combine(peekDir, "t", safe); }
                         l.Add(it);
                     }
@@ -2184,6 +2433,12 @@ namespace DbdCustom
                     using (var b = new SolidBrush(ov ? UI.Text : UI.Sub)) g.DrawString(it.Show, fs, b, new RectangleF(r.X + UI.S(6), tr.Bottom + UI.S(2), r.Width - UI.S(12), r.Bottom - tr.Bottom - UI.S(4)), sf);
                     r = tr;
                     if (it.Thumb != null) g.DrawImageUnscaled(it.Thumb, (int)(r.X + (r.Width - it.Thumb.Width) / 2), (int)(r.Y + (r.Height - it.Thumb.Height) / 2));
+                    if (installed && it.Rel != null && pack.Equals(getOv(it.Rel) ?? "", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var sr = new RectangleF(r.Right - UI.S(26), r.Y - UI.S(2), UI.S(22), UI.S(22));
+                        using (var b = new SolidBrush(UI.Orange)) g.FillEllipse(b, sr);
+                        using (var f = UI.F(8.5f, FontStyle.Bold)) UI.Txt(g, "\u2605", f, Color.White, sr, StringAlignment.Center);
+                    }
                     else if (it.Failed) UI.Txt(g, "✕", fs, UI.Dim, r, StringAlignment.Center);
                     else
                     {
@@ -2210,22 +2465,70 @@ namespace DbdCustom
                 UI.Txt(g, left, f, hover != null ? UI.Text : UI.Dim, new RectangleF(UI.S(22), H - UI.S(40), W / 2, UI.S(40)));
                 UI.Txt(g, "Tab  " + L.T("Kategorie wechseln") + "     Esc  " + L.T("Schließen"), f, UI.Dim, new RectangleF(W / 2, H - UI.S(40), W / 2 - UI.S(22), UI.S(40)), StringAlignment.Far);
             }
-            // Vergrößerung
+            // Vergrößerung mit Vorher/Nachher-Regler
+            zoomR = RectangleF.Empty; useR = RectangleF.Empty;
             if (zoom != null)
             {
-                using (var b = new SolidBrush(Color.FromArgb(215, 6, 5, 8))) g.FillRectangle(b, 0, th, W, H - th);
+                using (var b = new SolidBrush(Color.FromArgb(225, 6, 5, 8))) g.FillRectangle(b, 0, th, W, H - th);
                 if (zoomImg != null)
                 {
-                    float side = Math.Min(H - th - UI.S(110), UI.S(512));
-                    var zr = new RectangleF((W - side) / 2, th + (H - th - side) / 2 - UI.S(14), side, side);
-                    float sc = Math.Min(side / zoomImg.Width, side / zoomImg.Height);
-                    float iw = zoomImg.Width * sc, ih = zoomImg.Height * sc;
-                    g.DrawImage(zoomImg, zr.X + (side - iw) / 2, zr.Y + (side - ih) / 2, iw, ih);
-                    using (var f = UI.F(10f, FontStyle.Bold)) UI.Txt(g, zoom.Show + "   ·   " + zoom.Name + ".png", f, UI.Text, new RectangleF(0, zr.Bottom + UI.S(10), W, UI.S(28)), StringAlignment.Center);
+                    float side = Math.Min(H - th - UI.S(150), UI.S(500));
+                    var zr = new RectangleF((W - side) / 2, th + UI.S(28), side, side); zoomR = zr;
+                    Action<Image, RectangleF> drawFit = (im, clip) =>
+                    {
+                        float sc = Math.Min(side / im.Width, side / im.Height); float iw = im.Width * sc, ih = im.Height * sc;
+                        var oc2 = g.Clip; g.SetClip(clip, CombineMode.Intersect);
+                        g.DrawImage(im, zr.X + (side - iw) / 2, zr.Y + (side - ih) / 2, iw, ih); g.Clip = oc2;
+                    };
+                    if (zoomOrig != null)
+                    {
+                        float sx = zr.X + side * split;
+                        drawFit(zoomOrig, new RectangleF(zr.X, zr.Y, sx - zr.X, side));
+                        drawFit(zoomImg, new RectangleF(sx, zr.Y, zr.Right - sx, side));
+                        using (var p = new Pen(Color.FromArgb(230, 255, 255, 255), UI.Sf(2f))) g.DrawLine(p, sx, zr.Y, sx, zr.Bottom);
+                        var hc = new RectangleF(sx - UI.S(15), zr.Y + side / 2 - UI.S(15), UI.S(30), UI.S(30));
+                        using (var b = new SolidBrush(UI.Red)) g.FillEllipse(b, hc);
+                        using (var p = new Pen(Color.White, UI.Sf(1.6f)) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+                        {
+                            float cx = hc.X + hc.Width / 2, cy = hc.Y + hc.Height / 2, a2 = UI.Sf(4f);
+                            g.DrawLines(p, new[] { new PointF(cx - UI.Sf(3f), cy - a2), new PointF(cx - UI.Sf(7f), cy), new PointF(cx - UI.Sf(3f), cy + a2) });
+                            g.DrawLines(p, new[] { new PointF(cx + UI.Sf(3f), cy - a2), new PointF(cx + UI.Sf(7f), cy), new PointF(cx + UI.Sf(3f), cy + a2) });
+                        }
+                        using (var f = UI.F(8.5f, FontStyle.Bold))
+                        {
+                            Action<string, float, StringAlignment> lab = (t, x, al) =>
+                            {
+                                float lw = g.MeasureString(t, f).Width + UI.S(16); var lr = new RectangleF(al == StringAlignment.Near ? x : x - lw, zr.Y - UI.S(26), lw, UI.S(20));
+                                using (var path = UI.Round(lr, UI.S(10))) using (var bb = new SolidBrush(Color.FromArgb(200, 30, 28, 34))) g.FillPath(bb, path);
+                                UI.Txt(g, t, f, UI.Sub, lr, StringAlignment.Center);
+                            };
+                            lab(L.T("Original"), zr.X, StringAlignment.Near); lab(pack, zr.Right, StringAlignment.Far);
+                        }
+                    }
+                    else drawFit(zoomImg, zr);
+                    float ny = zr.Bottom + UI.S(14);
+                    using (var f = UI.F(10.5f, FontStyle.Bold)) UI.Txt(g, zoom.Show, f, UI.Text, new RectangleF(0, ny, W, UI.S(24)), StringAlignment.Center);
+                    using (var f = UI.F(8.5f)) UI.Txt(g, zoom.Name + ".png" + (zoomOrig != null ? "   ·   " + L.T("Regler ziehen zum Vergleichen") : ""), f, UI.Dim, new RectangleF(0, ny + UI.S(22), W, UI.S(18)), StringAlignment.Center);
+                    // Einzel-Icon übernehmen
+                    if (zoom.Rel != null)
+                    {
+                        bool isOv = installed && pack.Equals(getOv(zoom.Rel) ?? "", StringComparison.OrdinalIgnoreCase);
+                        string bt = !installed ? L.T("Zum Verwenden das Pack zuerst installieren") : isOv ? "\u2605  " + L.T("Wird verwendet – zurücksetzen") : (pack.Equals("Default", StringComparison.OrdinalIgnoreCase) ? L.T("Original-Icon verwenden") : L.T("Dieses Icon verwenden"));
+                        float bw; using (var f = UI.F(9.5f, FontStyle.Bold)) bw = g.MeasureString(bt, f).Width + UI.S(36);
+                        var br = new RectangleF((W - bw) / 2, ny + UI.S(50), bw, UI.S(36)); if (installed) useR = br;
+                        using (var path = UI.Round(br, br.Height / 2))
+                        {
+                            if (!installed) using (var b = new SolidBrush(Color.FromArgb(20, 255, 255, 255))) g.FillPath(b, path);
+                            else if (isOv) using (var b = new SolidBrush(UI.A(UI.Orange, overUse ? 90 : 60))) g.FillPath(b, path);
+                            else using (var b = new LinearGradientBrush(br, overUse ? UI.RedHi : UI.Red, UI.RedDark, 90f)) g.FillPath(b, path);
+                            using (var p = new Pen(Color.FromArgb(70, 255, 255, 255))) g.DrawPath(p, path);
+                        }
+                        using (var f = UI.F(9.5f, FontStyle.Bold)) UI.Txt(g, bt, f, installed ? Color.White : UI.Dim, br, StringAlignment.Center);
+                    }
                 }
             }
         }
-        void CloseZoom() { zoom = null; if (zoomImg != null) { zoomImg.Dispose(); zoomImg = null; } Invalidate(); }
+        void CloseZoom() { zoom = null; dragging = false; search.Visible = cats.Count > 0; if (zoomImg != null) { zoomImg.Dispose(); zoomImg = null; } if (zoomOrig != null) { zoomOrig.Dispose(); zoomOrig = null; } Invalidate(); }
         Item HitItem(Point pt)
         {
             if (cats.Count == 0 || zoom != null || !GridRect.Contains(pt)) return null;
@@ -2233,8 +2536,16 @@ namespace DbdCustom
             for (int i = 0; i < list.Count; i++) if (CellRect(i).Contains(pt)) return list[i];
             return null;
         }
+        protected override void OnMouseUp(MouseEventArgs e) { dragging = false; }
         protected override void OnMouseMove(MouseEventArgs e)
         {
+            if (zoom != null)
+            {
+                if (dragging && zoomR.Width > 0) { split = Math.Max(0f, Math.Min(1f, (e.X - zoomR.X) / zoomR.Width)); Invalidate(); }
+                bool ou = useR.Contains(e.Location); if (ou != overUse) { overUse = ou; Invalidate(); }
+                Cursor = ou ? Cursors.Hand : (zoomOrig != null && zoomR.Contains(e.Location) ? Cursors.SizeWE : Cursors.Default);
+                return;
+            }
             int ot = zoom == null ? tabR.FindIndex(r => r.Contains(e.Location)) : -1, ok = zoom == null ? kindR.FindIndex(r => r.Contains(e.Location)) : -1; bool oc = closeR.Contains(e.Location); var hi = HitItem(e.Location);
             if (ot != overTab || ok != overKind || oc != overClose || hi != hover) { overTab = ot; overKind = ok; overClose = oc; hover = hi; Invalidate(); }
             Cursor = ot >= 0 || ok >= 0 || oc || (hi != null && hi.Thumb != null) ? Cursors.Hand : (searchR.Contains(e.Location) ? Cursors.IBeam : Cursors.Default);
@@ -2244,7 +2555,17 @@ namespace DbdCustom
         protected override void OnMouseDown(MouseEventArgs e)
         {
             if (closeR.Contains(e.Location)) { Close(); return; }
-            if (zoom != null) { CloseZoom(); return; }
+            if (zoom != null)
+            {
+                if (useR.Contains(e.Location) && zoom.Rel != null)
+                {
+                    bool isOv = pack.Equals(getOv(zoom.Rel) ?? "", StringComparison.OrdinalIgnoreCase);
+                    setOv(zoom.Rel, isOv ? null : pack); Invalidate(); return;
+                }
+                if (zoomOrig != null && zoomR.Contains(e.Location)) { dragging = true; split = Math.Max(0f, Math.Min(1f, (e.X - zoomR.X) / zoomR.Width)); Invalidate(); return; }
+                if (zoomR.Contains(e.Location)) return;
+                CloseZoom(); return;
+            }
             int t = tabR.FindIndex(r => r.Contains(e.Location));
             if (t >= 0) { SetCat(t); return; }
             int kk = kindR.FindIndex(r => r.Contains(e.Location));
@@ -2255,7 +2576,11 @@ namespace DbdCustom
             if (it != null && it.Thumb != null)
             {
                 zoom = it; if (zoomImg != null) { zoomImg.Dispose(); zoomImg = null; }
-                zoomImg = new Bitmap(it.Thumb); Invalidate();
+                zoomImg = new Bitmap(it.Thumb); split = 0.5f; search.Visible = false;
+                if (zoomOrig != null) { zoomOrig.Dispose(); zoomOrig = null; }
+                if (defaultDir != null && it.Rel != null)
+                    try { var of = Path.Combine(defaultDir, it.Rel); if (File.Exists(of)) using (var fs = new FileStream(of, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) using (var im = Image.FromStream(fs)) zoomOrig = new Bitmap(im); } catch { }
+                Invalidate();
                 var target = it;
                 new System.Threading.Thread(() =>
                 {

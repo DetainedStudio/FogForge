@@ -48,7 +48,7 @@ function Res($name) {
 if ($Stage -in @("all", "app")) {
   $res = Res "app"
   $exe = Join-Path $out "FogForge.exe"
-  & $csc /nologo /target:winexe /optimize+ "/out:$exe" "/win32res:$res" "/resource:$(Join-Path $src 'logo.png'),logo.png" @refs @common
+  & $csc /nologo /target:winexe /optimize+ "/out:$exe" "/win32res:$res" "/resource:$(Join-Path $src 'logo.png'),logo.png" "/resource:$(Join-Path $src 'banner.jpg'),banner.jpg" @refs @common
   if ($LASTEXITCODE -ne 0) { throw "Building FogForge.exe failed" }
   Write-Host "Built $exe"
   if ($AppExe -eq "") { $AppExe = $exe }
