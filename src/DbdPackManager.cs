@@ -26,7 +26,7 @@ using Microsoft.Win32;
 namespace DbdCustom
 {
     // Programmversion – bei jedem Release erhöhen und als Tag v<Version> auf GitHub veröffentlichen
-    static class AppInfo { public const string Version = "4.2.1"; }
+    static class AppInfo { public const string Version = "4.2.2"; }
 
     // ============================================================ Design
     static class UI
@@ -635,7 +635,7 @@ namespace DbdCustom
         {
             if ((DateTime.Now - menuClosed).TotalMilliseconds < 250) return;   // erneuter Klick schließt nur
             var m = new PopupMenu { MenuWidth = 470 };
-            m.Add("\u21BB", L.T("Nach Updates suchen"), () => CheckNow(true), !busy);
+            m.Add("\u21BB", L.T("Nach Updates suchen"), () => CheckNow(true), !busy && !checking);
             m.Add(autoReapply ? "\u2611" : "\u2610", L.T("Packs nach Spiel-Updates automatisch neu anwenden"), () => { autoReapply = !autoReapply; SaveGamePath(); Log(autoReapply ? L.T("Packs werden nach Spiel-Updates automatisch neu angewendet.") : L.T("Nach Spiel-Updates wird vorher gefragt.")); });
             if (iconOv.Count > 0) m.Add("\u2605", L.F("Einzel-Icons zurücksetzen ({0})", iconOv.Count), ResetOverrides, !busy);
             m.Sep();
@@ -1340,18 +1340,39 @@ namespace DbdCustom
         // ---------------- Packs ----------------
         // Online-Katalog (GitHub): verfügbare Packs + Updates
         List<Remote.RPack> catalog = new List<Remote.RPack>(); string cacheDir;
-        void FetchCatalog()
+        void FetchCatalog() { FetchCatalog(null); }
+        int catRetry; Timer catRetryTimer;
+        // done(neue Packs, noch nicht lesbare Packs, Verbindung ok) – läuft im UI-Thread
+        void FetchCatalog(Action<List<string>, List<string>, bool> done)
         {
             var th = new System.Threading.Thread(() =>
             {
+                var pending = new List<string>(); bool ok = false; List<Remote.RPack> c = null;
+                try { c = Remote.FetchCatalog(15000, cacheDir, pending); ok = true; } catch { }
                 try
                 {
-                    var c = Remote.FetchCatalog(15000, cacheDir);
-                    if (c.Count == 0) return;
-                    try { Directory.CreateDirectory(cacheDir); Remote.SaveCache(c, Path.Combine(cacheDir, "catalog.txt")); } catch { }
-                    // sofort anzeigen, Vorschaubilder kommen danach
-                    BeginInvoke((Action)(() => { catalog = c; if (!busy) LoadPacks(); }));
-                    if (c.Any(rp => !string.IsNullOrEmpty(rp.Preview) && !File.Exists(Remote.PreviewFile(rp, cacheDir))))
+                    BeginInvoke((Action)(() =>
+                    {
+                        if (c != null && c.Count > 0)
+                        {
+                            try { Directory.CreateDirectory(cacheDir); Remote.SaveCache(c, Path.Combine(cacheDir, "catalog.txt")); } catch { }
+                            catalog = c; if (!busy) LoadPacks();
+                        }
+                        // frisch hochgeladene Packs: im Hintergrund alle 20 s erneut versuchen (max. 10x)
+                        if (pending.Count > 0 && catRetry < 10)
+                        {
+                            catRetry++;
+                            if (catRetryTimer == null) { catRetryTimer = new Timer { Interval = 20000 }; catRetryTimer.Tick += (s, e) => { catRetryTimer.Stop(); FetchCatalog(null); }; }
+                            catRetryTimer.Stop(); catRetryTimer.Start();
+                        }
+                        else if (pending.Count == 0) catRetry = 0;
+                        if (done != null)
+                        {
+                            var fresh = packs.Where(p => p.IsNew).Select(p => p.Name).ToList();
+                            done(fresh, pending, ok);
+                        }
+                    }));
+                    if (c != null && c.Any(rp => !string.IsNullOrEmpty(rp.Preview) && !File.Exists(Remote.PreviewFile(rp, cacheDir))))
                     {
                         Remote.FetchPreviews(c, cacheDir);
                         BeginInvoke((Action)(() => { if (!busy) LoadPacks(); }));
@@ -1363,21 +1384,25 @@ namespace DbdCustom
         }
         // ---------------- Programm-Update über GitHub ----------------
         Remote.AppUpdate appUpd; RectangleF updRect; Timer updTimer;
-        void CheckAppUpdate() { CheckAppUpdate(false); }
-        void CheckAppUpdate(bool manual)
+        void CheckAppUpdate() { CheckAppUpdate(null); }
+        // done(Update oder null, Verbindung ok) – läuft im UI-Thread
+        void CheckAppUpdate(Action<Remote.AppUpdate, bool> done)
         {
             new System.Threading.Thread(() =>
             {
+                Remote.AppUpdate u = null; bool ok = false;
+                try { u = Remote.CheckAppUpdate(15000); ok = true; } catch { }
                 try
                 {
-                    var u = Remote.CheckAppUpdate(15000);
-                    if (u != null && !string.IsNullOrEmpty(u.Url)) BeginInvoke((Action)(() =>
+                    BeginInvoke((Action)(() =>
                     {
-                        if (appUpd != null && appUpd.Version.CompareTo(u.Version) >= 0) return;
-                        appUpd = u; Log(L.F("FogForge {0} ist verfügbar.", u.Version.ToString(3))); Invalidate();
-                        if (updTimer == null) { updTimer = new Timer { Interval = 40 }; updTimer.Tick += (s, e) => { if (updRect.Width > 0 && WindowState != FormWindowState.Minimized) Inv(updRect, 4); }; updTimer.Start(); }
+                        if (u != null && !string.IsNullOrEmpty(u.Url) && (appUpd == null || appUpd.Version.CompareTo(u.Version) < 0))
+                        {
+                            appUpd = u; Log(L.F("FogForge {0} ist verfügbar.", u.Version.ToString(3))); Invalidate();
+                            if (updTimer == null) { updTimer = new Timer { Interval = 40 }; updTimer.Tick += (s, e) => { if (updRect.Width > 0 && WindowState != FormWindowState.Minimized) Inv(updRect, 4); }; updTimer.Start(); }
+                        }
+                        if (done != null) done(appUpd, ok);
                     }));
-                    else if (manual) BeginInvoke((Action)(() => { if (appUpd == null) Log(L.T("FogForge ist auf dem neuesten Stand.")); }));
                 }
                 catch { }
             }) { IsBackground = true }.Start();
@@ -1811,10 +1836,29 @@ namespace DbdCustom
 
         // ---------------- Updates im laufenden Betrieb ----------------
         DateTime lastOnlineCheck = DateTime.Now; Timer periodic;
+        bool checking;
         void CheckNow(bool manual)
         {
             lastOnlineCheck = DateTime.Now;
-            FetchCatalog(); CheckAppUpdate(manual); CheckDrift();
+            if (!manual) { FetchCatalog(); CheckAppUpdate(); CheckDrift(); return; }
+            if (checking) return;
+            checking = true; catRetry = 0; Log(L.T("Suche nach Updates …")); Cursor = Cursors.AppStarting;
+            List<string> fresh = null, pending = null; Remote.AppUpdate au = null; bool okCat = false, okApp = false; int left = 2;
+            Action fin = () =>
+            {
+                if (--left > 0) return;
+                checking = false; Cursor = Cursors.Default; CheckDrift();
+                var lines = new List<string>();
+                if (au != null) lines.Add(L.F("FogForge {0} ist verfügbar.", au.Version.ToString(3)));
+                if (fresh != null && fresh.Count > 0) lines.Add(L.F("Neue Packs: {0}", string.Join(", ", fresh.ToArray())));
+                if (pending != null && pending.Count > 0) lines.Add(L.F("{0} wird auf dem Server noch vorbereitet – FogForge versucht es automatisch weiter.", string.Join(", ", pending.ToArray())));
+                if (!okCat && !okApp) lines.Add(L.T("Keine Verbindung zum Server. Bitte später erneut versuchen."));
+                else if (lines.Count == 0) lines.Add(L.T("Alles ist auf dem neuesten Stand."));
+                Log(lines[0]);
+                DarkDialog.Info(this, L.T("Nach Updates suchen"), string.Join("\n\n", lines.ToArray()));
+            };
+            FetchCatalog((f, p, ok) => { fresh = f; pending = p; okCat = ok; fin(); });
+            CheckAppUpdate((u, ok) => { au = u; okApp = ok; fin(); });
         }
         protected override void OnActivated(EventArgs e)
         {

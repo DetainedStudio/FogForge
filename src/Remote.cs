@@ -133,7 +133,9 @@ namespace DbdCustom
 
         // ---------- Katalog ----------
         // Packs direkt aus dem neuesten Release: jede .zip ist ein Pack, <Name>-preview.jpg das Vorschaubild
-        public static List<RPack> FetchCatalog(int timeoutMs, string cacheDir)
+        public static List<RPack> FetchCatalog(int timeoutMs, string cacheDir) { return FetchCatalog(timeoutMs, cacheDir, null); }
+        // pending: Packs, deren Inhaltsverzeichnis (noch) nicht gelesen werden konnte – z. B. direkt nach dem Hochladen
+        public static List<RPack> FetchCatalog(int timeoutMs, string cacheDir, List<string> pending)
         {
             string json;
             var rq = Req(Api, timeoutMs); rq.Accept = "application/vnd." + new string(new[] { (char)103, (char)105, (char)116 }) + "hub+json";
@@ -162,10 +164,11 @@ namespace DbdCustom
             var ths = list.Select(p => new System.Threading.Thread(() => { try { ReadIndex(p, cacheDir); } catch { } }) { IsBackground = true }).ToList();
             ths.ForEach(t => t.Start()); ths.ForEach(t => t.Join(40000));
             // fehlgeschlagene Packs (z. B. gerade frisch hochgeladen) noch einmal versuchen …
-            var failed = list.Where(p => p.Counts.Count == 0).ToList();
-            if (failed.Count > 0)
+            for (int attempt = 0; attempt < 3; attempt++)
             {
-                System.Threading.Thread.Sleep(2500);
+                var failed = list.Where(p => p.Counts.Count == 0).ToList();
+                if (failed.Count == 0) break;
+                System.Threading.Thread.Sleep(2500 * (attempt + 1));
                 foreach (var p in failed) try { ReadIndex(p, cacheDir); } catch { }
             }
             // … und sonst mit den zuletzt bekannten Zahlen anzeigen statt ganz auszublenden
@@ -180,6 +183,7 @@ namespace DbdCustom
                     }
                 }
                 catch { }
+            if (pending != null) pending.AddRange(list.Where(p => p.Counts.Count == 0).Select(p => p.Name));
             return list.Where(p => p.Counts.Count > 0).ToList();
         }
 
