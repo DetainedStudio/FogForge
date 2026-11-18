@@ -69,6 +69,8 @@ namespace DbdCustom
                 var d = o as Dictionary<string, object>; if (d == null) continue;
                 var n = S(d, "name") ?? "";
                 if (!n.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) || n.IndexOf("setup", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                var st = S(d, "state");
+                if (st != null && st != "uploaded") continue;   // Upload läuft noch
                 var dig = S(d, "digest") ?? "";
                 return new AppUpdate { Version = v, Tag = tag, Url = S(d, "browser_download_url"), Bytes = (long)N(d, "size"), Sha256 = dig.StartsWith("sha256:") ? dig.Substring(7) : null, Notes = S(root, "body") };
             }
@@ -133,17 +135,30 @@ namespace DbdCustom
 
         // ---------- Katalog ----------
         // Packs direkt aus dem neuesten Release: jede .zip ist ein Pack, <Name>-preview.jpg das Vorschaubild
+        static string catEtag, catJson;
         public static List<RPack> FetchCatalog(int timeoutMs, string cacheDir) { return FetchCatalog(timeoutMs, cacheDir, null); }
         // pending: Packs, deren Inhaltsverzeichnis (noch) nicht gelesen werden konnte – z. B. direkt nach dem Hochladen
         public static List<RPack> FetchCatalog(int timeoutMs, string cacheDir, List<string> pending)
         {
-            string json;
+            string json = null;
             var rq = Req(Api, timeoutMs); rq.Accept = "application/vnd." + new string(new[] { (char)103, (char)105, (char)116 }) + "hub+json";
-            using (var resp = rq.GetResponse()) using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8)) json = sr.ReadToEnd();
+            // bedingte Abfrage: unverändert -> 304 (zählt nicht gegen das Abfrage-Limit, daher sind häufige Live-Prüfungen möglich)
+            if (catEtag != null && catJson != null) rq.Headers[HttpRequestHeader.IfNoneMatch] = catEtag;
+            try
+            {
+                using (var resp = (HttpWebResponse)rq.GetResponse())
+                using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+                { json = sr.ReadToEnd(); var et = resp.Headers[HttpResponseHeader.ETag]; catEtag = string.IsNullOrEmpty(et) ? null : et; catJson = json; }
+            }
+            catch (WebException ex)
+            {
+                var hr = ex.Response as HttpWebResponse;
+                if (hr != null && hr.StatusCode == HttpStatusCode.NotModified && catJson != null) json = catJson; else throw;
+            }
             var root = new Json(json).Value() as Dictionary<string, object>;
             var assets = root != null && root.ContainsKey("assets") ? root["assets"] as List<object> : null;
             var list = new List<RPack>();
-            if (assets == null) return list;
+            if (assets == null) throw new IOException("catalog");
             var names = new HashSet<string>(assets.Select(a => S(a as Dictionary<string, object>, "name") ?? ""), StringComparer.OrdinalIgnoreCase);
             foreach (var o in assets)
             {
@@ -153,6 +168,8 @@ namespace DbdCustom
                 var name = file.Substring(0, file.Length - 4);
                 if (name.EndsWith("-thumbs", StringComparison.OrdinalIgnoreCase)) continue;
                 if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || name.Contains("..") || name.Equals("Default", StringComparison.OrdinalIgnoreCase)) continue;
+                var st = S(d, "state");
+                if (st != null && st != "uploaded") { if (pending != null) pending.Add(name); continue; }   // Upload läuft noch
                 var dig = S(d, "digest") ?? "";
                 var p = new RPack { Name = name, File = file, Bytes = (long)N(d, "size"), Sha256 = dig.StartsWith("sha256:") ? dig.Substring(7) : null };
                 p.Stamp = !string.IsNullOrEmpty(p.Sha256) ? p.Sha256 : (S(d, "updated_at") ?? "") + "/" + p.Bytes;
@@ -164,25 +181,14 @@ namespace DbdCustom
             var ths = list.Select(p => new System.Threading.Thread(() => { try { ReadIndex(p, cacheDir); } catch { } }) { IsBackground = true }).ToList();
             ths.ForEach(t => t.Start()); ths.ForEach(t => t.Join(40000));
             // fehlgeschlagene Packs (z. B. gerade frisch hochgeladen) noch einmal versuchen …
-            for (int attempt = 0; attempt < 3; attempt++)
+            for (int attempt = 0; attempt < 1; attempt++)
             {
                 var failed = list.Where(p => p.Counts.Count == 0).ToList();
                 if (failed.Count == 0) break;
                 System.Threading.Thread.Sleep(2500 * (attempt + 1));
                 foreach (var p in failed) try { ReadIndex(p, cacheDir); } catch { }
             }
-            // … und sonst mit den zuletzt bekannten Zahlen anzeigen statt ganz auszublenden
-            if (list.Any(p => p.Counts.Count == 0))
-                try
-                {
-                    var old = LoadCache(Path.Combine(cacheDir, "catalog.txt"));
-                    foreach (var p in list.Where(x => x.Counts.Count == 0))
-                    {
-                        var o = old.FirstOrDefault(x => x.Name.Equals(p.Name, StringComparison.OrdinalIgnoreCase));
-                        if (o != null) { foreach (var kv in o.Counts) p.Counts[kv.Key] = kv.Value; p.Icons = o.Icons; }
-                    }
-                }
-                catch { }
+            // noch nicht lesbare Packs (z. B. gerade beim Hochladen) erst anzeigen, wenn sie wirklich bereit sind
             if (pending != null) pending.AddRange(list.Where(p => p.Counts.Count == 0).Select(p => p.Name));
             return list.Where(p => p.Counts.Count > 0).ToList();
         }

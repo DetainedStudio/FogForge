@@ -26,7 +26,7 @@ using Microsoft.Win32;
 namespace DbdCustom
 {
     // Programmversion – bei jedem Release erhöhen und als Tag v<Version> auf GitHub veröffentlichen
-    static class AppInfo { public const string Version = "4.2.3"; }
+    static class AppInfo { public const string Version = "4.3.0"; }
 
     // ============================================================ Design
     static class UI
@@ -570,7 +570,9 @@ namespace DbdCustom
             FetchCatalog();
             CheckAppUpdate();
             LoadOv();
-            periodic = new Timer { Interval = 30 * 60 * 1000 }; periodic.Tick += (s, e) => { if (!busy) CheckNow(false); }; periodic.Start();
+            periodic = new Timer { Interval = 30 * 60 * 1000 }; periodic.Tick += (s, e) => { if (!busy) { CheckAppUpdate(); CheckDrift(); } }; periodic.Start();
+            livePoll = new Timer { Interval = 5000 }; livePoll.Tick += (s, e) => LivePollTick(); livePoll.Start();
+            liveTick = new Timer { Interval = 500 }; liveTick.Tick += (s, e) => { if (WindowState != FormWindowState.Minimized) Inv(liveRect, 2); }; liveTick.Start();
 
             watcher = new FileSystemWatcher(packsDir) { NotifyFilter = NotifyFilters.DirectoryName | NotifyFilters.FileName, IncludeSubdirectories = false };
             refreshTimer = new Timer { Interval = 900 };
@@ -921,7 +923,7 @@ namespace DbdCustom
             using (var f = UI.F(9f, FontStyle.Bold)) UI.Txt(g, packs.Count(z => !z.Available).ToString(), f, UI.Dim, new RectangleF(sw - UI.S(60), top + UI.S(6), UI.S(38), UI.S(26)), StringAlignment.Far);
 
             int y0 = top + UI.S(38); int cardH = UI.S(128), gap = UI.S(14), x = UI.S(18), w = sw - UI.S(36);
-            float listH = H - y0 - UI.S(70);
+            float listH = H - y0 - UI.S(106);
             float secH = UI.S(34); bool anyAvail = packs.Any(z => z.Available);
             float maxScroll = Math.Max(0, packs.Count * (cardH + gap) + (anyAvail ? secH : 0) - listH);
             scroll = Math.Max(0, Math.Min(scroll, maxScroll));
@@ -987,6 +989,20 @@ namespace DbdCustom
             if (packs.Count == 0)
                 using (var f = UI.F(10f)) using (var b = new SolidBrush(UI.Sub))
                     g.DrawString(L.T("Noch keine Packs.\n\nLege Ordner wie „Cartoon“\nin den Ordner „Packs“."), f, b, new RectangleF(UI.S(24), y0 + UI.S(10), sw - UI.S(48), UI.S(200)));
+
+            // Live-Status: was gerade mit GitHub abgeglichen / aktualisiert wird
+            liveRect = new RectangleF(UI.S(18), H - UI.S(92), sw - UI.S(36), UI.S(28));
+            AddHot("live", liveRect, () => CheckNow(true), !busy && !checking, L.T("Klicken, um jetzt zu prüfen"));
+            {
+                Color dot; string lt = LiveText(out dot); float hl = Hv("live");
+                using (var path = UI.Round(liveRect, UI.S(8))) using (var b = new SolidBrush(Color.FromArgb((int)(8 + 22 * hl), 255, 255, 255))) g.FillPath(b, path);
+                float ph = (float)((Math.Sin(Environment.TickCount / 300.0) + 1) / 2);
+                bool spin = fetching || (busy && autoName != null) || livePending.Count > 0;
+                float cx = liveRect.X + UI.S(14), cyy = liveRect.Y + liveRect.Height / 2, rr0 = UI.Sf(3.5f);
+                using (var b = new SolidBrush(UI.A(dot, (int)(60 + 60 * ph)))) g.FillEllipse(b, cx - rr0 * 2f, cyy - rr0 * 2f, rr0 * 4f, rr0 * 4f);
+                using (var b = new SolidBrush(spin ? UI.A(dot, (int)(140 + 115 * ph)) : dot)) g.FillEllipse(b, cx - rr0, cyy - rr0, rr0 * 2, rr0 * 2);
+                using (var f = UI.F(8.5f)) UI.Txt(g, lt, f, UI.Sub, new RectangleF(liveRect.X + UI.S(26), liveRect.Y, liveRect.Width - UI.S(32), liveRect.Height));
+            }
 
             // Packs-Ordner-Knopf unten
             var rb = new RectangleF(UI.S(18), H - UI.S(56), sw - UI.S(36), UI.S(38));
@@ -1341,10 +1357,19 @@ namespace DbdCustom
         // Online-Katalog (GitHub): verfügbare Packs + Updates
         List<Remote.RPack> catalog = new List<Remote.RPack>(); string cacheDir;
         void FetchCatalog() { FetchCatalog(null); }
-        int catRetry; Timer catRetryTimer;
+        // Live-Abgleich mit GitHub
+        bool fetching, liveOk, catalogLive; DateTime liveAt = DateTime.MinValue, liveTry = DateTime.MinValue; List<string> livePending = new List<string>();
+        Timer livePoll, liveTick; RectangleF liveRect;
+        HashSet<string> autoFailed = new HashSet<string>(StringComparer.OrdinalIgnoreCase); string autoName;
         // done(neue Packs, noch nicht lesbare Packs, Verbindung ok) – läuft im UI-Thread
         void FetchCatalog(Action<List<string>, List<string>, bool> done)
         {
+            if (fetching)
+            {
+                if (done != null) { var t = new Timer { Interval = 400 }; t.Tick += (s2, e2) => { if (fetching) return; t.Stop(); t.Dispose(); FetchCatalog(done); }; t.Start(); }
+                return;
+            }
+            fetching = true; liveTry = DateTime.Now; Inv(liveRect, 2);
             var th = new System.Threading.Thread(() =>
             {
                 var pending = new List<string>(); bool ok = false; List<Remote.RPack> c = null;
@@ -1353,21 +1378,28 @@ namespace DbdCustom
                 {
                     BeginInvoke((Action)(() =>
                     {
-                        if (c != null && c.Count > 0)
+                        fetching = false; liveOk = ok;
+                        if (ok)
                         {
+                            liveAt = DateTime.Now; catalogLive = true;
+                            livePending = pending.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
                             Func<List<Remote.RPack>, string> sig = l => string.Join("|", l.OrderBy(r => r.Name).Select(r => r.Name + ":" + r.Stamp + ":" + r.Icons + ":" + (r.Preview ?? "")).ToArray());
                             bool changed = catalog == null || sig(catalog) != sig(c);
-                            try { Directory.CreateDirectory(cacheDir); Remote.SaveCache(c, Path.Combine(cacheDir, "catalog.txt")); } catch { }
-                            catalog = c; if (changed && !busy) LoadPacks();
+                            if (changed)
+                            {
+                                var before = new HashSet<string>((catalog ?? new List<Remote.RPack>()).Select(r => r.Name), StringComparer.OrdinalIgnoreCase);
+                                var after = new HashSet<string>(c.Select(r => r.Name), StringComparer.OrdinalIgnoreCase);
+                                if (catalog != null && catalog.Count > 0)
+                                {
+                                    foreach (var n in after.Where(n => !before.Contains(n))) Log(L.F("Neues Pack verfügbar: {0}", n));
+                                    foreach (var n in before.Where(n => !after.Contains(n) && !livePending.Contains(n, StringComparer.OrdinalIgnoreCase))) Log(L.F("„{0}“ ist nicht mehr verfügbar.", n));
+                                }
+                                try { Directory.CreateDirectory(cacheDir); Remote.SaveCache(c, Path.Combine(cacheDir, "catalog.txt")); } catch { }
+                                catalog = c; if (!busy) LoadPacks();
+                            }
+                            else AutoUpdateNext();
                         }
-                        // frisch hochgeladene Packs: im Hintergrund alle 20 s erneut versuchen (max. 10x)
-                        if (pending.Count > 0 && catRetry < 10)
-                        {
-                            catRetry++;
-                            if (catRetryTimer == null) { catRetryTimer = new Timer { Interval = 20000 }; catRetryTimer.Tick += (s, e) => { catRetryTimer.Stop(); FetchCatalog(null); }; }
-                            catRetryTimer.Stop(); catRetryTimer.Start();
-                        }
-                        else if (pending.Count == 0) catRetry = 0;
+                        Inv(liveRect, 2);
                         if (done != null)
                         {
                             var fresh = packs.Where(p => p.IsNew).Select(p => p.Name).ToList();
@@ -1380,9 +1412,52 @@ namespace DbdCustom
                         BeginInvoke((Action)(() => { if (!busy) LoadPacks(); }));
                     }
                 }
-                catch { }
+                catch { fetching = false; }
             }) { IsBackground = true };
             th.Start();
+        }
+        // wie oft geprüft wird: im Vordergrund jede Minute, im Hintergrund seltener, beim Hochladen alle 20 s
+        void LivePollTick()
+        {
+            if (fetching || busy) return;
+            double sec = (DateTime.Now - liveTry).TotalSeconds, due;
+            if (WindowState == FormWindowState.Minimized) due = 600;
+            else if (!liveOk) due = 30;
+            else if (livePending.Count > 0) due = 20;
+            else if (Form.ActiveForm == this) due = 60;
+            else due = 180;
+            if (sec >= due) FetchCatalog();
+        }
+        // installierte Packs mit neuer Version auf GitHub direkt im Hintergrund aktualisieren
+        void AutoUpdateNext()
+        {
+            if (busy || checking || !catalogLive) return;
+            string active = ActivePack();
+            var p = packs.FirstOrDefault(x => !x.Available && x.Update && x.Rem != null && x.Name != active && !autoFailed.Contains(x.Name + "|" + x.Rem.Stamp));
+            if (p == null) return;
+            var rem = p.Rem; string name = p.Name, dest = packsDir; autoName = name;
+            Log(L.F("„{0}“ wird automatisch aktualisiert …", name));
+            Run(L.F("„{0}“ wird automatisch aktualisiert …", name), bw => Remote.Install(rem, dest, (pc, t) => bw.ReportProgress(pc, t)),
+                () => { autoName = null; Log(L.F("„{0}“ wurde aktualisiert.", name)); },
+                "Pack installiert",
+                ex => { autoName = null; autoFailed.Add(name + "|" + rem.Stamp); Log(L.F("Automatisches Update von „{0}“ fehlgeschlagen: {1}", name, ex.Message)); });
+        }
+        string LiveText(out Color dot)
+        {
+            string active = ActivePack();
+            if (busy && autoName != null) { dot = UI.Orange; return status + "  " + ((int)Math.Round(Math.Max(0, Math.Min(1, progressShown)) * 100)) + " %"; }
+            if (fetching && liveAt == DateTime.MinValue) { dot = UI.Orange; return L.T("Server wird geprüft …"); }
+            if (!liveOk && liveTry != DateTime.MinValue && !fetching) { dot = UI.RedHi; return L.T("Offline – FogForge versucht es automatisch erneut."); }
+            if (livePending.Count > 0) { dot = UI.Orange; return L.F("{0} wird auf dem Server vorbereitet …", string.Join(", ", livePending.ToArray())); }
+            var up = packs.FirstOrDefault(x => !x.Available && x.Update && x.Name == active);
+            if (up != null) { dot = UI.Orange; return L.F("„{0}“ hat ein Update – zum Aktualisieren zuerst entladen.", up.Name); }
+            if (fetching) { dot = UI.Green; return L.T("Server wird geprüft …"); }
+            dot = UI.Green;
+            if (liveAt == DateTime.MinValue) return L.T("Server wird geprüft …");
+            int s = (int)(DateTime.Now - liveAt).TotalSeconds;
+            if (s < 10) return L.T("Live · gerade geprüft");
+            if (s < 60) return L.F("Live · geprüft vor {0} s", s / 5 * 5);
+            return L.F("Live · geprüft vor {0} min", s / 60);
         }
         // ---------------- Programm-Update über GitHub ----------------
         Remote.AppUpdate appUpd; RectangleF updRect; Timer updTimer;
@@ -1522,6 +1597,7 @@ namespace DbdCustom
                 foreach (var pi in src.Packs.OrderBy(x => PackOrder(x.Name)).ThenBy(x => x.Name))
                 {
                     if (seen.Contains(pi.Name) || pi.Name.Equals("Default", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (catalogLive && Rem(pi.Name) == null) continue;   // auf GitHub nicht (mehr) verfügbar -> nicht anbieten
                     seen.Add(pi.Name);
                     var ap = new Pack { Name = pi.Name, Available = true, Source = src, Dir = Path.Combine(packsDir, pi.Name) };
                     foreach (var kv in pi.Counts) if (Cats.Contains(kv.Key)) ap.Counts[kv.Key] = kv.Value;
@@ -1532,6 +1608,7 @@ namespace DbdCustom
             var next = packs.FirstOrDefault(x => x.Name == keep) ?? packs.FirstOrDefault(x => x.Name == active) ?? packs.FirstOrDefault();
             sel = null; SelectPack(next, false);
             Invalidate();
+            if (!busy && IsHandleCreated) BeginInvoke((Action)AutoUpdateNext);
         }
 
         Image LoadPreview(Pack p)
@@ -1850,7 +1927,7 @@ namespace DbdCustom
             lastOnlineCheck = DateTime.Now;
             if (!manual) { FetchCatalog(); CheckAppUpdate(); CheckDrift(); return; }
             if (checking) return;
-            checking = true; catRetry = 0; Log(L.T("Suche nach Updates …")); Cursor = Cursors.AppStarting;
+            checking = true; Log(L.T("Suche nach Updates …")); Cursor = Cursors.AppStarting;
             List<string> fresh = null, pending = null; Remote.AppUpdate au = null; bool okCat = false, okApp = false; int left = 2;
             Action fin = () =>
             {
@@ -1972,7 +2049,7 @@ namespace DbdCustom
         {
             return L.T(title);
         }
-        void Run(string title, Action<BackgroundWorker> job, Action done, string doneKey = "Fertig")
+        void Run(string title, Action<BackgroundWorker> job, Action done, string doneKey = "Fertig", Action<Exception> onError = null)
         {
             busy = true; progress = 0; progressShown = 0; status = title; Invalidate();
             DoWorkEventHandler w = null; RunWorkerCompletedEventHandler c = null;
@@ -1980,7 +2057,7 @@ namespace DbdCustom
             c = (s, e) =>
             {
                 worker.DoWork -= w; worker.RunWorkerCompleted -= c; busy = false; stateKnown = false;
-                if (e.Error != null) { Log(L.F("Fehler: {0}", e.Error.Message)); DarkDialog.Info(this, L.T("Fehler"), e.Error.Message); }
+                if (e.Error != null) { if (onError != null) onError(e.Error); else { Log(L.F("Fehler: {0}", e.Error.Message)); DarkDialog.Info(this, L.T("Fehler"), e.Error.Message); } }
                 else { progress = 1; if (done != null) done(); }
                 doneOk = e.Error == null; doneMsg = doneOk ? DoneText(doneKey) : L.T("Fehlgeschlagen"); doneAt = Environment.TickCount;
                 LoadPacks(); anim.Start();
