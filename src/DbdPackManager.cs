@@ -26,7 +26,7 @@ using Microsoft.Win32;
 namespace DbdCustom
 {
     // Programmversion – bei jedem Release erhöhen und als Tag v<Version> auf GitHub veröffentlichen
-    static class AppInfo { public const string Version = "4.2.2"; }
+    static class AppInfo { public const string Version = "4.2.3"; }
 
     // ============================================================ Design
     static class UI
@@ -195,7 +195,7 @@ namespace DbdCustom
         public bool Available; public PayloadFile Source; public string SourceDir; public Remote.RPack Rem; public bool Update;     // noch nicht installiert, aus Installer/ZIP verfügbar
         public Dictionary<string, int> Counts = new Dictionary<string, int>();
         public int Total { get { return Counts.Values.Sum(); } }
-        public Image Preview; public Bitmap Backdrop, Card, Hero; public bool IsNew;
+        public Image Preview; public Bitmap Backdrop, Card, Hero; public bool IsNew, Stale;
     }
 
     // Klickbarer Bereich mit weicher Hover-Animation
@@ -1355,8 +1355,10 @@ namespace DbdCustom
                     {
                         if (c != null && c.Count > 0)
                         {
+                            Func<List<Remote.RPack>, string> sig = l => string.Join("|", l.OrderBy(r => r.Name).Select(r => r.Name + ":" + r.Stamp + ":" + r.Icons + ":" + (r.Preview ?? "")).ToArray());
+                            bool changed = catalog == null || sig(catalog) != sig(c);
                             try { Directory.CreateDirectory(cacheDir); Remote.SaveCache(c, Path.Combine(cacheDir, "catalog.txt")); } catch { }
-                            catalog = c; if (!busy) LoadPacks();
+                            catalog = c; if (changed && !busy) LoadPacks();
                         }
                         // frisch hochgeladene Packs: im Hintergrund alle 20 s erneut versuchen (max. 10x)
                         if (pending.Count > 0 && catRetry < 10)
@@ -1448,7 +1450,11 @@ namespace DbdCustom
         {
             stateKnown = false;
             string keep = keepAfterLoad ?? (sel != null ? sel.Name : null); keepAfterLoad = null;
-            foreach (var p in packs) { if (p.Preview != null) p.Preview.Dispose(); if (p.Backdrop != null) p.Backdrop.Dispose(); if (p.Card != null) p.Card.Dispose(); if (p.Hero != null) p.Hero.Dispose(); }
+            foreach (var p in packs)
+            {
+                if (p.Preview != null) p.Preview.Dispose(); if (p.Backdrop != null) p.Backdrop.Dispose(); if (p.Card != null) p.Card.Dispose(); if (p.Hero != null) p.Hero.Dispose();
+                p.Preview = null; p.Backdrop = null; p.Card = null; p.Hero = null; p.Stale = true;
+            }
             packs.Clear();
             foreach (var d in Directory.GetDirectories(packsDir).OrderBy(x => PackOrder(Path.GetFileName(x))).ThenBy(x => x))
             {
@@ -1578,6 +1584,8 @@ namespace DbdCustom
         }
         void SelectPack(Pack p, bool animate = true)
         {
+            // Pack-Objekt von vor dem Neuladen (z. B. Klick während der Katalog im Hintergrund aktualisiert wurde) -> aktuelles nehmen
+            if (p != null && p.Stale) p = packs.FirstOrDefault(x => x.Name.Equals(p.Name, StringComparison.OrdinalIgnoreCase));
             if (p == sel) return;
             sel = p; MarkSeen(p); if (anim != null) anim.Start();
             if (p != null && p.Preview != null && (p.Backdrop == null || p.Backdrop.Size != ClientSize)) { if (p.Backdrop != null) p.Backdrop.Dispose(); p.Backdrop = UI.Blur(p.Preview, ClientSize, 150); }
