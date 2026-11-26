@@ -26,7 +26,7 @@ using Microsoft.Win32;
 namespace DbdCustom
 {
     // Programmversion – bei jedem Release erhöhen und als Tag v<Version> auf GitHub veröffentlichen
-    static class AppInfo { public const string Version = "4.3.1"; }
+    static class AppInfo { public const string Version = "4.3.2"; }
 
     // ============================================================ Design
     static class UI
@@ -1419,7 +1419,7 @@ namespace DbdCustom
         // wie oft geprüft wird: im Vordergrund jede Minute, im Hintergrund seltener, beim Hochladen alle 20 s
         void LivePollTick()
         {
-            if (fetching || busy) return;
+            if (fetching || (busy && livePending.Count == 0)) return;
             double sec = (DateTime.Now - liveTry).TotalSeconds, due;
             if (WindowState == FormWindowState.Minimized) due = 600;
             else if (!liveOk) due = 30;

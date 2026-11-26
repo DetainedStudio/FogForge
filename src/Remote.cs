@@ -1,4 +1,4 @@
-// FogForge – Packs aus dem Internet
+﻿// FogForge – Packs aus dem Internet
 // Katalog: packs.json. Jedes Pack ist eine ZIP-Datei mit dem Ordner <Name>/…
 using System;
 using System.Collections.Generic;
@@ -181,7 +181,7 @@ namespace DbdCustom
             var ths = list.Select(p => new System.Threading.Thread(() => { try { ReadIndex(p, cacheDir); } catch { } }) { IsBackground = true }).ToList();
             ths.ForEach(t => t.Start()); ths.ForEach(t => t.Join(40000));
             // fehlgeschlagene Packs (z. B. gerade frisch hochgeladen) noch einmal versuchen …
-            for (int attempt = 0; attempt < 1; attempt++)
+            for (int attempt = 0; attempt < 2; attempt++)
             {
                 var failed = list.Where(p => p.Counts.Count == 0).ToList();
                 if (failed.Count == 0) break;
@@ -209,7 +209,10 @@ namespace DbdCustom
                 foreach (var l in System.IO.File.ReadAllLines(cf)) { var kv = l.Split('='); int n; if (kv.Length == 2 && int.TryParse(kv[1], out n)) p.Counts[kv[0]] = n; }
                 p.Icons = p.Counts.Values.Sum(); return;
             }
-            foreach (var e in ListEntries(p)) { if (IsPlaceholder(e.Name)) continue; int c; p.Counts.TryGetValue(e.Cat, out c); p.Counts[e.Cat] = c + 1; }
+            List<ZEntry> ents;
+            try { ents = ListEntries(p); }
+            catch { if (string.IsNullOrEmpty(p.Thumbs)) throw; ents = ListEntries(p, p.Thumbs); }   // Ersatz: gleiches Inhaltsverzeichnis in der kleinen Vorschau-ZIP
+            foreach (var e in ents) { if (IsPlaceholder(e.Name)) continue; int c; p.Counts.TryGetValue(e.Cat, out c); p.Counts[e.Cat] = c + 1; }
             p.Icons = p.Counts.Values.Sum();
             try { Directory.CreateDirectory(cacheDir); System.IO.File.WriteAllLines(cf, p.Counts.Select(kv => kv.Key + "=" + kv.Value).ToArray()); } catch { }
         }
@@ -297,7 +300,7 @@ namespace DbdCustom
         {
             Direct d;
             lock (direct) if (!refresh && direct.TryGetValue(asset, out d) && Environment.TickCount - d.At < 180000) return d.Url;
-            string url = Base + asset;
+            string url = Base + asset + (refresh ? "?r=" + (Environment.TickCount & 0x7fffffff) : "");
             try
             {
                 for (int hop = 0; hop < 5; hop++)
@@ -327,8 +330,10 @@ namespace DbdCustom
                 try
                 {
                     var r = Req(DirectUrl(asset, attempt > 0), 30000); r.AddRange(from, to);
-                    using (var resp = r.GetResponse()) using (var s = resp.GetResponseStream()) using (var ms = new MemoryStream())
+                    using (var resp = (HttpWebResponse)r.GetResponse()) using (var s = resp.GetResponseStream()) using (var ms = new MemoryStream())
                     {
+                        // Server ignoriert den Teilbereich -> nicht die ganze Datei laden, sondern neue Adresse holen
+                        if (resp.StatusCode != HttpStatusCode.PartialContent && (from > 0 || resp.ContentLength > to - from + 1)) throw new WebException("range");
                         s.CopyTo(ms); long t = 0; var cr = resp.Headers["Content-Range"];
                         if (cr != null && cr.Contains("/")) long.TryParse(cr.Substring(cr.LastIndexOf('/') + 1), out t);
                         return new RangeResult { Data = ms.ToArray(), Total = t };
