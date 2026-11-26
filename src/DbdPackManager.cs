@@ -26,7 +26,7 @@ using Microsoft.Win32;
 namespace DbdCustom
 {
     // Programmversion – bei jedem Release erhöhen und als Tag v<Version> auf GitHub veröffentlichen
-    static class AppInfo { public const string Version = "4.3.5"; }
+    static class AppInfo { public const string Version = "4.3.6"; }
 
     // ============================================================ Design
     static class UI
@@ -1609,7 +1609,7 @@ namespace DbdCustom
             sel = null; SelectPack(next, false);
             Invalidate();
             if (!busy && IsHandleCreated) BeginInvoke((Action)AutoUpdateNext);
-            WarmThumbs();
+            WarmThumbs(); if (catalogLive) WarmRemoteThumbs();
         }
 
         Image LoadPreview(Pack p)
@@ -1670,6 +1670,18 @@ namespace DbdCustom
             {
                 System.Threading.Thread.Sleep(1500);
                 foreach (var d in dirs) { if (gen != thumbGen || IsDisposed) return; try { ThumbStore.WarmLocal(d, () => gen != thumbGen || IsDisposed); } catch { } }
+            }) { IsBackground = true, Priority = System.Threading.ThreadPriority.BelowNormal }.Start();
+        }
+        // Vorschau-Miniaturen aller noch nicht installierten Packs einmal herunterladen und im FogForge-Ordner (Cache\thumbs) ablegen
+        int remoteWarmGen;
+        void WarmRemoteThumbs()
+        {
+            int gen = ++remoteWarmGen;
+            var list = (catalog ?? new List<Remote.RPack>()).Where(r => !string.IsNullOrEmpty(r.Thumbs) && !packs.Any(x => !x.Available && x.Name.Equals(r.Name, StringComparison.OrdinalIgnoreCase))).OrderBy(r => sel != null && r.Name == sel.Name ? 0 : 1).ToList();
+            new System.Threading.Thread(() =>
+            {
+                System.Threading.Thread.Sleep(3000);
+                foreach (var r in list) { if (gen != remoteWarmGen || IsDisposed) return; while (busy && !IsDisposed) System.Threading.Thread.Sleep(2000); try { ThumbStore.FetchRemote(r); } catch { } }
             }) { IsBackground = true, Priority = System.Threading.ThreadPriority.BelowNormal }.Start();
         }
         void PrefetchThumbs(Pack p)
@@ -2479,7 +2491,7 @@ namespace DbdCustom
     // ============================================================ Pack-Vorschau
     class PackPreview : Form
     {
-        class Item { public string Name, File, TFile, Show, Key, Rel, Id; public long Len, Ticks; public char Kind; public Remote.ZEntry E, TE; public Bitmap Thumb; public bool Queued, Failed, Visible; }
+        class Item { public string Name, File, TFile, Show, Key, Rel, Id; public long Len, Ticks; public char Kind; public Remote.ZEntry E, TE; public Bitmap Thumb; public bool Queued, Failed, Visible; public int Tries, FailedAt; }
         static readonly string[] Prefixes = { "T_UI_", "iconsPerks_", "iconPerks_", "iconAddons_", "iconAddon_", "iconItems_", "iconsFavors_", "iconFavors_", "iconsPowers_", "iconPowers_", "icons_", "icon_" };
         static Item MakeItem(string name)
         {
@@ -2506,7 +2518,7 @@ namespace DbdCustom
         int cat, kindSel; float scroll, scrollTarget; TextBox search; string query = ""; List<RectangleF> kindR = new List<RectangleF>(); int overKind = -1; RectangleF searchR; bool listing = true, listFail, closing; Item hover, zoom; Bitmap zoomImg;
         List<RectangleF> tabR = new List<RectangleF>(); RectangleF closeR; int overTab = -1; bool overClose;
         readonly List<Item> queue = new List<Item>(); readonly object qlock = new object(); volatile bool dirty; Timer tick;
-        volatile ThumbStore.Set tset; List<Item> viewCache; string viewKey; readonly List<Item> lastVis = new List<Item>();
+        int lastRefetch, refetches; volatile ThumbStore.Set tset; List<Item> viewCache; string viewKey; readonly List<Item> lastVis = new List<Item>();
         const int Cell = 118, CellH = 140, Thumb = 100, HeadH = 84;
         readonly Image art; Bitmap bgArt, headArt;
 
@@ -2662,7 +2674,7 @@ namespace DbdCustom
                         if (closing) { th.Dispose(); return; }
                         it.Thumb = th;
                     }
-                    catch { it.Failed = true; }
+                    catch { it.Failed = true; it.Tries++; it.FailedAt = Environment.TickCount; }
                     it.Queued = false; dirty = true;
                 }
             }
@@ -2837,6 +2849,8 @@ namespace DbdCustom
             var need = new List<Item>();
             foreach (var it in lastVis) it.Visible = false; lastVis.Clear();
             int budget = 48; var ts0 = tset;
+            if (ts0 != null && localDir == null && ts0.FetchFailed && !ts0.Fetching && Environment.TickCount - lastRefetch > 5000 && refetches < 3)
+            { lastRefetch = Environment.TickCount; refetches++; var rp = rem; new System.Threading.Thread(() => { ThumbStore.FetchRemote(rp); dirty = true; }) { IsBackground = true }.Start(); }
             using (var fs = UI.F(8f))
                 for (int i = 0; i < list.Count; i++)
                 {
@@ -2844,10 +2858,12 @@ namespace DbdCustom
                     bool vis = r.Bottom > gr.Y - UI.S(Cell) && r.Y < gr.Bottom + UI.S(Cell);   // eine Reihe Vorlauf
                     if (!vis) continue;
                     it.Visible = true; lastVis.Add(it);
-                    if (it.Thumb == null && !it.Failed && ts0 != null && budget > 0)
+                    // fehlgeschlagene Bilder nach kurzer Pause noch einmal versuchen (z. B. kurzer Netzwerk-Aussetzer)
+                    if (it.Failed && it.Tries < 4 && Environment.TickCount - it.FailedAt > 2500) it.Failed = false;
+                    if (it.Thumb == null && ts0 != null && budget > 0)
                     {
                         var png = ThumbStore.Peek(ts0, it.Id, it.Len, it.Ticks);
-                        if (png != null) { budget--; try { it.Thumb = ThumbStore.Decode(png); } catch { it.Failed = true; } }
+                        if (png != null) { budget--; try { it.Thumb = ThumbStore.Decode(png); it.Failed = false; } catch { it.Failed = true; it.Tries++; it.FailedAt = Environment.TickCount; } }
                     }
                     bool ov = it == hover;
                     using (var path = UI.Round(r, UI.S(10)))
@@ -2866,13 +2882,13 @@ namespace DbdCustom
                         using (var b = new SolidBrush(UI.Orange)) g.FillEllipse(b, sr);
                         using (var f = UI.F(8.5f, FontStyle.Bold)) UI.Txt(g, "\u2605", f, Color.White, sr, StringAlignment.Center);
                     }
-                    else if (it.Failed) UI.Txt(g, "✕", fs, UI.Dim, r, StringAlignment.Center);
+                    else if (it.Failed) { UI.Txt(g, "✕", fs, UI.Dim, r, StringAlignment.Center); if (it.Tries < 4) dirty = true; }
                     else if (it.Thumb == null)
                     {
                         float a = (Environment.TickCount / 4 + i * 40) % 360;
                         using (var p = new Pen(UI.A(UI.Red, 140), UI.Sf(2f))) g.DrawArc(p, r.X + r.Width / 2 - UI.S(10), r.Y + r.Height / 2 - UI.S(10), UI.S(20), UI.S(20), a, 100);
                         dirty = true;
-                        if (!it.Queued && !(ts0 != null && localDir == null && (ts0.Fetching || ThumbStore.Peek(ts0, it.Id, 0, 0) != null))) need.Add(it);
+                        if (!it.Queued && !(ts0 != null && localDir == null && (ts0.Fetching || (ts0.Map.Count == 0 && !ts0.FetchFailed) || ThumbStore.Peek(ts0, it.Id, 0, 0) != null))) need.Add(it);
                     }
                 }
             g.Clip = oc;
