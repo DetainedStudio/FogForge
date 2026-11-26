@@ -26,7 +26,7 @@ using Microsoft.Win32;
 namespace DbdCustom
 {
     // Programmversion – bei jedem Release erhöhen und als Tag v<Version> auf GitHub veröffentlichen
-    static class AppInfo { public const string Version = "4.3.3"; }
+    static class AppInfo { public const string Version = "4.3.4"; }
 
     // ============================================================ Design
     static class UI
