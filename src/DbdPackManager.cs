@@ -26,7 +26,7 @@ using Microsoft.Win32;
 namespace DbdCustom
 {
     // Programmversion – bei jedem Release erhöhen und als Tag v<Version> auf GitHub veröffentlichen
-    static class AppInfo { public const string Version = "4.3.2"; }
+    static class AppInfo { public const string Version = "4.3.3"; }
 
     // ============================================================ Design
     static class UI
@@ -2646,6 +2646,7 @@ namespace DbdCustom
                 foreach (var it in batch)
                 {
                     if (closing) return;
+                    if (it.Thumb != null) { it.Queued = false; continue; }
                     try
                     {
                         Bitmap th; var ts = tset;
@@ -2836,7 +2837,7 @@ namespace DbdCustom
                         using (var f = UI.F(8.5f, FontStyle.Bold)) UI.Txt(g, "\u2605", f, Color.White, sr, StringAlignment.Center);
                     }
                     else if (it.Failed) UI.Txt(g, "✕", fs, UI.Dim, r, StringAlignment.Center);
-                    else
+                    else if (it.Thumb == null)
                     {
                         float a = (Environment.TickCount / 4 + i * 40) % 360;
                         using (var p = new Pen(UI.A(UI.Red, 140), UI.Sf(2f))) g.DrawArc(p, r.X + r.Width / 2 - UI.S(10), r.Y + r.Height / 2 - UI.S(10), UI.S(20), UI.S(20), a, 100);
