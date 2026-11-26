@@ -26,7 +26,7 @@ using Microsoft.Win32;
 namespace DbdCustom
 {
     // Programmversion – bei jedem Release erhöhen und als Tag v<Version> auf GitHub veröffentlichen
-    static class AppInfo { public const string Version = "4.3.3"; }
+    static class AppInfo { public const string Version = "4.3.4"; }
 
     // ============================================================ Design
     static class UI
@@ -765,7 +765,7 @@ namespace DbdCustom
             string dir = p.Available ? p.SourceDir : p.Dir;
             MarkSeen(p);
             var def = FindInstalled("Default");
-            using (var d = new PackPreview(p.Name, dir != null && Directory.Exists(dir) ? dir : null, p.Rem, cacheDir, !p.Available, def != null ? def.Dir : null, GetOv, SetOv)) d.ShowDialog(this);
+            using (var d = new PackPreview(p.Name, dir != null && Directory.Exists(dir) ? dir : null, p.Rem, cacheDir, !p.Available, def != null ? def.Dir : null, GetOv, SetOv, p.Preview)) d.ShowDialog(this);
             Invalidate();
         }
 
@@ -2507,10 +2507,12 @@ namespace DbdCustom
         List<RectangleF> tabR = new List<RectangleF>(); RectangleF closeR; int overTab = -1; bool overClose;
         readonly List<Item> queue = new List<Item>(); readonly object qlock = new object(); volatile bool dirty; Timer tick;
         volatile ThumbStore.Set tset; List<Item> viewCache; string viewKey; readonly List<Item> lastVis = new List<Item>();
-        const int Cell = 118, CellH = 140, Thumb = 100;
+        const int Cell = 118, CellH = 140, Thumb = 100, HeadH = 84;
+        readonly Image art; Bitmap bgArt, headArt;
 
-        public PackPreview(string pack, string localDir, Remote.RPack rem, string cacheDir, bool installed, string defaultDir, Func<string, string> getOv, Action<string, string> setOv)
+        public PackPreview(string pack, string localDir, Remote.RPack rem, string cacheDir, bool installed, string defaultDir, Func<string, string> getOv, Action<string, string> setOv, Image art = null)
         {
+            this.art = art == null ? null : new Bitmap(art);
             this.pack = pack; this.localDir = localDir; this.rem = localDir == null ? rem : null; this.installed = installed && localDir != null; this.getOv = getOv; this.setOv = setOv;
             this.defaultDir = pack.Equals("Default", StringComparison.OrdinalIgnoreCase) ? null : defaultDir;
             if (this.rem != null) { var st = rem.Stamp ?? "v"; peekDir = Path.Combine(cacheDir ?? Path.GetTempPath(), "peek", pack + "-" + new string(st.Where(char.IsLetterOrDigit).Take(12).ToArray())); }
@@ -2554,6 +2556,7 @@ namespace DbdCustom
             lock (qlock) { queue.Clear(); System.Threading.Monitor.PulseAll(qlock); }
             foreach (var l in items.Values) foreach (var it in l) if (it.Thumb != null) it.Thumb.Dispose();
             if (zoomImg != null) zoomImg.Dispose();
+            foreach (var b in new Image[] { art, bgArt, headArt }) if (b != null) b.Dispose();
             base.OnFormClosed(e);
         }
 
@@ -2715,7 +2718,7 @@ namespace DbdCustom
                 return viewCache;
             }
         }
-        RectangleF GridRect { get { int W = ClientSize.Width, H = ClientSize.Height; float top = UI.S(60) + UI.S(112); return new RectangleF(UI.S(22), top, W - UI.S(44), H - top - UI.S(42)); } }
+        RectangleF GridRect { get { int W = ClientSize.Width, H = ClientSize.Height; float top = UI.S(HeadH) + UI.S(112); return new RectangleF(UI.S(22), top, W - UI.S(44), H - top - UI.S(42)); } }
         int Cols { get { return Math.Max(1, (int)((GridRect.Width + UI.S(8)) / UI.S(Cell))); } }
         float MaxScroll { get { if (cats.Count == 0) return 0; int n = View.Count; int rows = (n + Cols - 1) / Cols; return Math.Max(0, rows * UI.S(CellH) - GridRect.Height + UI.S(8)); } }
         RectangleF CellRect(int i)
@@ -2726,17 +2729,44 @@ namespace DbdCustom
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            var g = e.Graphics; UI.HQ(g); int W = ClientSize.Width, H = ClientSize.Height, th = UI.S(60);
+            var g = e.Graphics; UI.HQ(g); int W = ClientSize.Width, H = ClientSize.Height, th = UI.S(HeadH);
             g.Clear(BackColor);
-            using (var p = new Pen(Color.FromArgb(55, 255, 255, 255))) g.DrawRectangle(p, 0, 0, W - 1, H - 1);
-            using (var b = new SolidBrush(Color.FromArgb(10, 9, 13))) g.FillRectangle(b, 0, 0, W, th);
+            // Hintergrund wie im Hauptfenster: Vorschaubild des Packs, weichgezeichnet und abgedunkelt
+            if (art != null && (bgArt == null || bgArt.Size != ClientSize)) { if (bgArt != null) bgArt.Dispose(); bgArt = UI.Blur(art, ClientSize, 190); }
+            if (bgArt != null) g.DrawImageUnscaled(bgArt, 0, 0);
+            using (var b = new LinearGradientBrush(new Rectangle(0, 0, W, H), Color.FromArgb(120, 10, 9, 12), Color.FromArgb(215, 10, 9, 12), 90f)) g.FillRectangle(b, 0, 0, W, H);
+            // Kopfzeile mit Pack-Bild
+            if (art != null && (headArt == null || headArt.Width != W || headArt.Height != th))
+            {
+                if (headArt != null) headArt.Dispose(); headArt = new Bitmap(W, th, PixelFormat.Format32bppPArgb);
+                using (var hg = Graphics.FromImage(headArt))
+                {
+                    hg.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    var cr = UI.Cover(art.Size, new RectangleF(0, 0, W, th * 2.6f)); cr.Y -= th * 0.55f; hg.DrawImage(art, cr);
+                    using (var lb = new LinearGradientBrush(new Rectangle(0, 0, W, th), Color.FromArgb(235, 10, 9, 12), Color.FromArgb(90, 10, 9, 12), 0f))
+                    { lb.InterpolationColors = new ColorBlend { Colors = new[] { Color.FromArgb(240, 10, 9, 12), Color.FromArgb(170, 10, 9, 12), Color.FromArgb(120, 10, 9, 12), Color.FromArgb(210, 10, 9, 12) }, Positions = new[] { 0f, 0.4f, 0.75f, 1f } }; hg.FillRectangle(lb, 0, 0, W, th); }
+                    using (var vb = new LinearGradientBrush(new Rectangle(0, 0, W, th), Color.FromArgb(0, 10, 9, 12), Color.FromArgb(200, 10, 9, 12), 90f)) hg.FillRectangle(vb, 0, 0, W, th);
+                }
+            }
+            if (headArt != null) g.DrawImageUnscaled(headArt, 0, 0); else using (var b = new SolidBrush(Color.FromArgb(10, 9, 13))) g.FillRectangle(b, 0, 0, W, th);
             using (var lg = new LinearGradientBrush(new RectangleF(0, th - 2, W, 2), UI.A(UI.Red, 0), UI.A(UI.Red, 220), 0f))
-            { lg.InterpolationColors = new ColorBlend { Colors = new[] { UI.A(UI.Red, 0), UI.A(UI.Red, 230), UI.A(UI.Red, 0) }, Positions = new[] { 0f, 0.35f, 1f } }; g.FillRectangle(lg, 0, th - 2, W, 2); }
+            { lg.InterpolationColors = new ColorBlend { Colors = new[] { UI.A(UI.Red, 0), UI.A(UI.Red, 240), UI.A(UI.Red, 0) }, Positions = new[] { 0f, 0.3f, 1f } }; g.FillRectangle(lg, 0, th - 2, W, 2); }
+            using (var gl = new LinearGradientBrush(new RectangleF(0, th - 2, W, UI.S(26)), UI.A(UI.Red, 40), UI.A(UI.Red, 0), 90f)) g.FillRectangle(gl, 0, th - 1, W * 0.6f, UI.S(24));
+            using (var p = new Pen(Color.FromArgb(55, 255, 255, 255))) g.DrawRectangle(p, 0, 0, W - 1, H - 1);
             int total = items.Values.Sum(l => l.Count);
-            using (var f = UI.F(13f, FontStyle.Bold)) UI.Txt(g, pack + "  ·  " + L.T("Vorschau"), f, UI.Text, new RectangleF(UI.S(24), 0, W - UI.S(300), th));
-            if (total > 0) using (var f = UI.F(9f)) UI.Txt(g, L.F("{0} Icons", total.ToString("N0")), f, UI.Sub, new RectangleF(W - UI.S(260), 0, UI.S(190), th), StringAlignment.Far);
-            closeR = new RectangleF(W - UI.S(56), 0, UI.S(56), th - 2);
-            if (overClose) using (var b = new SolidBrush(UI.Red)) g.FillRectangle(b, closeR);
+            // Titel: kleines Label + großer Pack-Name
+            using (var f = UI.F(8.5f, FontStyle.Bold)) UI.Txt(g, L.T("Vorschau").ToUpperInvariant(), f, UI.A(UI.RedHi, 235), new RectangleF(UI.S(26), UI.S(14), W - UI.S(300), UI.S(20)));
+            using (var f = UI.F(19f, FontStyle.Bold)) UI.Txt(g, pack, f, UI.Text, new RectangleF(UI.S(24), UI.S(30), W - UI.S(300), UI.S(40)));
+            if (total > 0)
+                using (var f = UI.F(9f, FontStyle.Bold))
+                {
+                    string tt = L.F("{0} Icons", total.ToString("N0")); float tw = g.MeasureString(tt, f).Width + UI.S(22);
+                    var pr = new RectangleF(W - UI.S(72) - tw, (th - UI.S(28)) / 2, tw, UI.S(28));
+                    using (var path = UI.Round(pr, pr.Height / 2)) { using (var b = new SolidBrush(Color.FromArgb(150, 10, 9, 12))) g.FillPath(b, path); using (var pp = new Pen(Color.FromArgb(50, 255, 255, 255))) g.DrawPath(pp, path); }
+                    UI.Txt(g, tt, f, UI.Sub, pr, StringAlignment.Center);
+                }
+            closeR = new RectangleF(W - UI.S(58), (th - UI.S(44)) / 2, UI.S(44), UI.S(44));
+            if (overClose) using (var path = UI.Round(closeR, UI.S(10))) using (var b = new SolidBrush(UI.Red)) g.FillPath(b, path);
             using (var p = new Pen(UI.Text, UI.Sf(1.4f))) { float s5 = UI.S(6); var c = new PointF(closeR.X + closeR.Width / 2, closeR.Y + closeR.Height / 2); g.DrawLine(p, c.X - s5, c.Y - s5, c.X + s5, c.Y + s5); g.DrawLine(p, c.X + s5, c.Y - s5, c.X - s5, c.Y + s5); }
 
             if (listing || listFail || cats.Count == 0)
@@ -2822,8 +2852,8 @@ namespace DbdCustom
                     bool ov = it == hover;
                     using (var path = UI.Round(r, UI.S(10)))
                     {
-                        using (var b = new SolidBrush(ov ? Color.FromArgb(40, 255, 255, 255) : Color.FromArgb(14, 255, 255, 255))) g.FillPath(b, path);
-                        using (var p = new Pen(ov ? UI.A(UI.Red, 200) : Color.FromArgb(22, 255, 255, 255), ov ? UI.Sf(1.6f) : 1f)) g.DrawPath(p, path);
+                        using (var b = new LinearGradientBrush(r, ov ? Color.FromArgb(150, 46, 20, 24) : Color.FromArgb(130, 24, 23, 29), ov ? Color.FromArgb(150, 22, 12, 14) : Color.FromArgb(130, 14, 13, 17), 90f)) g.FillPath(b, path);
+                        using (var p = new Pen(ov ? UI.A(UI.Red, 220) : Color.FromArgb(30, 255, 255, 255), ov ? UI.Sf(1.6f) : 1f)) g.DrawPath(p, path);
                     }
                     var tr = new RectangleF(r.X, r.Y + UI.S(4), r.Width, UI.S(Thumb));
                     using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
@@ -2995,7 +3025,7 @@ namespace DbdCustom
                 }) { IsBackground = true }.Start();
                 return;
             }
-            if (e.Y < UI.S(60)) MainForm.DragWindow(Handle);
+            if (e.Y < UI.S(HeadH)) MainForm.DragWindow(Handle);
         }
     }
 
