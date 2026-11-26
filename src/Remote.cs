@@ -242,6 +242,14 @@ namespace DbdCustom
             }
             return list;
         }
+        // kleine Datei aus dem Release komplett laden (z. B. <Name>-thumbs.zip für die Vorschau)
+        public static byte[] GetAsset(string asset)
+        {
+            var r0 = AssetRange(asset, 0, 0); if (r0.Total <= 0) throw new IOException("size");
+            var d = AssetRange(asset, 0, r0.Total - 1).Data;
+            if (d.Length != r0.Total) throw new IOException("size");
+            return d;
+        }
         public static byte[] ReadEntry(RPack p, ZEntry e)
         {
             var res = ReadEntries(new List<ZEntry> { e });

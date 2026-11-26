@@ -1,4 +1,4 @@
-// FogForge 4.0 (vorher DBD Custom Pack Manager) – Icon-Packs für Dead by Daylight aktivieren, wechseln und entladen
+﻿// FogForge 4.0 (vorher DBD Custom Pack Manager) – Icon-Packs für Dead by Daylight aktivieren, wechseln und entladen
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -26,7 +26,7 @@ using Microsoft.Win32;
 namespace DbdCustom
 {
     // Programmversion – bei jedem Release erhöhen und als Tag v<Version> auf GitHub veröffentlichen
-    static class AppInfo { public const string Version = "4.3.0"; }
+    static class AppInfo { public const string Version = "4.3.1"; }
 
     // ============================================================ Design
     static class UI
@@ -564,7 +564,7 @@ namespace DbdCustom
             anim.Start();
 
             gamePath = LoadGamePath() ?? DetectGame();
-            cacheDir = Path.Combine(baseDir, "Cache");
+            cacheDir = Path.Combine(baseDir, "Cache"); ThumbStore.Dir = Path.Combine(cacheDir, "thumbs");
             try { var cj = Path.Combine(cacheDir, "catalog.txt"); if (File.Exists(cj)) catalog = Remote.LoadCache(cj); } catch { }
             LoadPacks();
             FetchCatalog();
@@ -1609,6 +1609,7 @@ namespace DbdCustom
             sel = null; SelectPack(next, false);
             Invalidate();
             if (!busy && IsHandleCreated) BeginInvoke((Action)AutoUpdateNext);
+            WarmThumbs();
         }
 
         Image LoadPreview(Pack p)
@@ -1659,12 +1660,34 @@ namespace DbdCustom
             float ideal = w * p.Preview.Height / p.Preview.Width, avail = H - y0 - UI.S(350);
             return (int)Math.Round(Math.Max(UI.S(200), Math.Min(ideal, avail)));
         }
+        // Vorschau-Miniaturen im Hintergrund vorbereiten, damit die Pack-Vorschau sofort alles zeigt
+        int thumbGen;
+        void WarmThumbs()
+        {
+            int gen = ++thumbGen;
+            var dirs = packs.Where(x => !x.Available && x.Dir != null).OrderBy(x => x == sel ? 0 : 1).Select(x => x.Dir).ToList();
+            new System.Threading.Thread(() =>
+            {
+                System.Threading.Thread.Sleep(1500);
+                foreach (var d in dirs) { if (gen != thumbGen || IsDisposed) return; try { ThumbStore.WarmLocal(d, () => gen != thumbGen || IsDisposed); } catch { } }
+            }) { IsBackground = true, Priority = System.Threading.ThreadPriority.BelowNormal }.Start();
+        }
+        void PrefetchThumbs(Pack p)
+        {
+            if (p == null) return;
+            var rp = p.Rem ?? Rem(p.Name); string dir = p.Available ? null : p.Dir;
+            if (dir == null && (rp == null || string.IsNullOrEmpty(rp.Thumbs))) return;
+            new System.Threading.Thread(() =>
+            {
+                try { if (dir != null) { if (Directory.Exists(dir)) ThumbStore.ForLocal(dir); } else ThumbStore.FetchRemote(rp); } catch { }
+            }) { IsBackground = true, Priority = System.Threading.ThreadPriority.BelowNormal }.Start();
+        }
         void SelectPack(Pack p, bool animate = true)
         {
             // Pack-Objekt von vor dem Neuladen (z. B. Klick während der Katalog im Hintergrund aktualisiert wurde) -> aktuelles nehmen
             if (p != null && p.Stale) p = packs.FirstOrDefault(x => x.Name.Equals(p.Name, StringComparison.OrdinalIgnoreCase));
             if (p == sel) return;
-            sel = p; MarkSeen(p); if (anim != null) anim.Start();
+            sel = p; MarkSeen(p); if (anim != null) anim.Start(); PrefetchThumbs(p);
             if (p != null && p.Preview != null && (p.Backdrop == null || p.Backdrop.Size != ClientSize)) { if (p.Backdrop != null) p.Backdrop.Dispose(); p.Backdrop = UI.Blur(p.Preview, ClientSize, 150); }
             StartWarm();
             Invalidate();
@@ -2257,10 +2280,206 @@ namespace DbdCustom
         }
     }
 
+    // ============================================================ Miniaturen-Speicher
+    // Kleine Vorschaubilder je Pack als fertige PNG-Bytes: im Speicher (zuletzt benutzte Packs) und auf der Platte
+    // (Cache\thumbs\<pack>.fft). Damit erscheinen die Icons in der Vorschau sofort statt nach und nach.
+    static class ThumbStore
+    {
+        public static string Dir;
+        public static int Side { get { return UI.S(100); } }
+        public class Entry { public long Len, Ticks; public byte[] Png; }
+        public class Set
+        {
+            public string Key, File; public readonly Dictionary<string, Entry> Map = new Dictionary<string, Entry>(StringComparer.OrdinalIgnoreCase);
+            public volatile bool Loaded, Fetching, FetchFailed; public bool Dirty; public int Used; public readonly object Lock = new object();
+        }
+        static readonly List<Set> sets = new List<Set>();
+        static string Hash(string s)
+        {
+            using (var h = System.Security.Cryptography.SHA1.Create()) return BitConverter.ToString(h.ComputeHash(System.Text.Encoding.UTF8.GetBytes(s))).Replace("-", "").Substring(0, 16).ToLowerInvariant();
+        }
+        static Set Get(string key)
+        {
+            lock (sets)
+            {
+                var s = sets.FirstOrDefault(x => x.Key == key);
+                if (s == null)
+                {
+                    s = new Set { Key = key, File = Dir == null ? null : Path.Combine(Dir, key + ".fft") }; sets.Add(s);
+                    while (sets.Count > 4) sets.Remove(sets.OrderBy(x => x.Used).First());
+                }
+                s.Used = Environment.TickCount; return s;
+            }
+        }
+        public static Set ForLocal(string dir) { var s = Get("L" + Hash(Path.GetFullPath(dir).TrimEnd('\\').ToLowerInvariant())); EnsureLoaded(s); return s; }
+        public static Set ForRemote(Remote.RPack p) { var s = Get("R" + Hash(p.Name + "|" + (p.Stamp ?? ""))); EnsureLoaded(s); return s; }
+
+        public static void EnsureLoaded(Set s)
+        {
+            if (s.Loaded) return;
+            lock (s.Lock)
+            {
+                if (s.Loaded) return;
+                try
+                {
+                    if (s.File != null && System.IO.File.Exists(s.File))
+                        using (var br = new BinaryReader(new BufferedStream(System.IO.File.OpenRead(s.File), 1 << 16)))
+                        {
+                            if (br.ReadInt32() == 0x31544646 && br.ReadInt32() == Side)
+                            {
+                                int n = br.ReadInt32();
+                                for (int i = 0; i < n; i++)
+                                {
+                                    var id = br.ReadString(); var e = new Entry { Len = br.ReadInt64(), Ticks = br.ReadInt64() };
+                                    int bl = br.ReadInt32(); e.Png = br.ReadBytes(bl); if (e.Png.Length == bl) s.Map[id] = e;
+                                }
+                            }
+                        }
+                }
+                catch { s.Map.Clear(); }
+                s.Loaded = true;
+            }
+        }
+        public static void Save(Set s)
+        {
+            if (s.File == null) return;
+            lock (io)
+            {
+            List<KeyValuePair<string, Entry>> snap;
+            lock (s.Lock) { if (!s.Dirty) return; s.Dirty = false; snap = s.Map.ToList(); }
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(s.File)); var tmp = s.File + ".part";
+                using (var bw = new BinaryWriter(new BufferedStream(System.IO.File.Create(tmp), 1 << 16)))
+                {
+                    bw.Write(0x31544646); bw.Write(Side); bw.Write(snap.Count);
+                    foreach (var kv in snap) { bw.Write(kv.Key); bw.Write(kv.Value.Len); bw.Write(kv.Value.Ticks); bw.Write(kv.Value.Png.Length); bw.Write(kv.Value.Png); }
+                }
+                if (System.IO.File.Exists(s.File)) System.IO.File.Delete(s.File);
+                System.IO.File.Move(tmp, s.File);
+            }
+            catch { }
+            }
+        }
+        static readonly object io = new object();
+        // nur Einträge behalten, die es noch gibt (gelöschte/umbenannte Icons fliegen raus)
+        public static void Prune(Set s, ICollection<string> keep)
+        {
+            var hs = new HashSet<string>(keep, StringComparer.OrdinalIgnoreCase);
+            lock (s.Lock) foreach (var k in s.Map.Keys.Where(k => !hs.Contains(k)).ToList()) { s.Map.Remove(k); s.Dirty = true; }
+        }
+
+        // fertige Miniatur, wenn vorhanden und (bei lokalen Dateien) noch aktuell
+        public static byte[] Peek(Set s, string id, long len, long ticks)
+        {
+            Entry e; lock (s.Lock) if (!s.Map.TryGetValue(id, out e)) return null;
+            return (len == 0 || (e.Len == len && e.Ticks == ticks)) ? e.Png : null;
+        }
+        public static byte[] MakeLocal(Set s, string id, string file, long len, long ticks)
+        {
+            var have = Peek(s, id, len, ticks); if (have != null) return have;
+            byte[] png;
+            using (var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) using (var im = Image.FromStream(fs)) png = Encode(im);
+            lock (s.Lock) { s.Map[id] = new Entry { Len = len, Ticks = ticks, Png = png }; s.Dirty = true; }
+            return png;
+        }
+        static byte[] Encode(Image im)
+        {
+            using (var b = Shrink(im, Side)) using (var ms = new MemoryStream()) { b.Save(ms, ImageFormat.Png); return ms.ToArray(); }
+        }
+        public static Bitmap Decode(byte[] png)
+        {
+            using (var ms = new MemoryStream(png)) using (var im = Image.FromStream(ms))
+            {
+                var b = new Bitmap(im.Width, im.Height, PixelFormat.Format32bppPArgb);
+                using (var g = Graphics.FromImage(b)) { g.CompositingMode = CompositingMode.SourceCopy; g.DrawImage(im, 0, 0, im.Width, im.Height); }
+                return b;
+            }
+        }
+        public static Bitmap Shrink(Image im, int side)
+        {
+            float k = Math.Min(1f, Math.Min((float)side / im.Width, (float)side / im.Height));
+            int w = Math.Max(1, (int)Math.Round(im.Width * k)), h = Math.Max(1, (int)Math.Round(im.Height * k));
+            var b = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
+            using (var g = Graphics.FromImage(b)) { g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.PixelOffsetMode = PixelOffsetMode.HighQuality; g.CompositingQuality = CompositingQuality.HighQuality; g.DrawImage(im, 0, 0, w, h); }
+            return b;
+        }
+        static int Workers { get { return Math.Max(2, Math.Min(8, Environment.ProcessorCount - 1)); } }
+
+        // alle Icons eines installierten Packs vorbereiten (im Hintergrund, z. B. beim Start)
+        public static void WarmLocal(string dir, Func<bool> cancel)
+        {
+            if (Dir == null || dir == null || !Directory.Exists(dir)) return;
+            var s = ForLocal(dir); var files = new List<string>();
+            foreach (var c in MainForm.Cats)
+            {
+                var d = Path.Combine(dir, c); if (!Directory.Exists(d)) continue;
+                files.AddRange(Directory.GetFiles(d, "*.png", SearchOption.AllDirectories).Where(f => !Remote.IsPlaceholder(f)));
+            }
+            var rels = files.Select(f => f.Substring(dir.TrimEnd('\\').Length + 1)).ToList();
+            int next = -1; var ths = new List<System.Threading.Thread>();
+            for (int w = 0; w < Workers; w++)
+            {
+                var t = new System.Threading.Thread(() =>
+                {
+                    int i;
+                    while ((i = System.Threading.Interlocked.Increment(ref next)) < files.Count)
+                    {
+                        if (cancel != null && cancel()) return;
+                        try { var fi = new FileInfo(files[i]); MakeLocal(s, rels[i], files[i], fi.Length, fi.LastWriteTimeUtc.Ticks); } catch { }
+                    }
+                }) { IsBackground = true, Priority = System.Threading.ThreadPriority.BelowNormal };
+                ths.Add(t); t.Start();
+            }
+            ths.ForEach(t => t.Join());
+            if (cancel == null || !cancel()) { Prune(s, rels); Save(s); }
+        }
+
+        // Miniaturen eines (noch nicht installierten) Packs: die kleine Vorschau-ZIP am Stück laden
+        public static void FetchRemote(Remote.RPack p)
+        {
+            if (p == null || string.IsNullOrEmpty(p.Thumbs)) return;
+            var s = ForRemote(p);
+            lock (s.Lock) { if (s.Map.Count > 0 || s.Fetching) return; s.Fetching = true; s.FetchFailed = false; }
+            try
+            {
+                var data = Remote.GetAsset(p.Thumbs);
+                var raw = new List<KeyValuePair<string, byte[]>>();
+                using (var za = new ZipArchive(new MemoryStream(data), ZipArchiveMode.Read))
+                    foreach (var e in za.Entries)
+                    {
+                        if (!e.FullName.EndsWith(".png", StringComparison.OrdinalIgnoreCase)) continue;
+                        using (var es = e.Open()) using (var ms = new MemoryStream()) { es.CopyTo(ms); raw.Add(new KeyValuePair<string, byte[]>(e.FullName.Replace('\\', '/'), ms.ToArray())); }
+                    }
+                int next = -1; var ths = new List<System.Threading.Thread>();
+                for (int w = 0; w < Workers; w++)
+                {
+                    var t = new System.Threading.Thread(() =>
+                    {
+                        int i;
+                        while ((i = System.Threading.Interlocked.Increment(ref next)) < raw.Count)
+                            try
+                            {
+                                byte[] png; using (var ms = new MemoryStream(raw[i].Value)) using (var im = Image.FromStream(ms)) png = Encode(im);
+                                lock (s.Lock) s.Map[raw[i].Key] = new Entry { Png = png };
+                            }
+                            catch { }
+                    }) { IsBackground = true };
+                    ths.Add(t); t.Start();
+                }
+                ths.ForEach(t => t.Join());
+                lock (s.Lock) s.Dirty = true;
+                Save(s);
+            }
+            catch { s.FetchFailed = true; }
+            finally { s.Fetching = false; }
+        }
+    }
+
     // ============================================================ Pack-Vorschau
     class PackPreview : Form
     {
-        class Item { public string Name, File, TFile, Show, Key, Rel; public char Kind; public Remote.ZEntry E, TE; public Bitmap Thumb; public bool Queued, Failed, Visible; }
+        class Item { public string Name, File, TFile, Show, Key, Rel, Id; public long Len, Ticks; public char Kind; public Remote.ZEntry E, TE; public Bitmap Thumb; public bool Queued, Failed, Visible; }
         static readonly string[] Prefixes = { "T_UI_", "iconsPerks_", "iconPerks_", "iconAddons_", "iconAddon_", "iconItems_", "iconsFavors_", "iconFavors_", "iconsPowers_", "iconPowers_", "icons_", "icon_" };
         static Item MakeItem(string name)
         {
@@ -2287,6 +2506,7 @@ namespace DbdCustom
         int cat, kindSel; float scroll, scrollTarget; TextBox search; string query = ""; List<RectangleF> kindR = new List<RectangleF>(); int overKind = -1; RectangleF searchR; bool listing = true, listFail, closing; Item hover, zoom; Bitmap zoomImg;
         List<RectangleF> tabR = new List<RectangleF>(); RectangleF closeR; int overTab = -1; bool overClose;
         readonly List<Item> queue = new List<Item>(); readonly object qlock = new object(); volatile bool dirty; Timer tick;
+        volatile ThumbStore.Set tset; List<Item> viewCache; string viewKey; readonly List<Item> lastVis = new List<Item>();
         const int Cell = 118, CellH = 140, Thumb = 100;
 
         public PackPreview(string pack, string localDir, Remote.RPack rem, string cacheDir, bool installed, string defaultDir, Func<string, string> getOv, Action<string, string> setOv)
@@ -2330,6 +2550,7 @@ namespace DbdCustom
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             closing = true; tick.Stop(); tick.Dispose();
+            var tsc = tset; if (tsc != null && tsc.Dirty) new System.Threading.Thread(() => ThumbStore.Save(tsc)) { IsBackground = true }.Start();
             lock (qlock) { queue.Clear(); System.Threading.Monitor.PulseAll(qlock); }
             foreach (var l in items.Values) foreach (var it in l) if (it.Thumb != null) it.Thumb.Dispose();
             if (zoomImg != null) zoomImg.Dispose();
@@ -2346,9 +2567,10 @@ namespace DbdCustom
                     foreach (var c in MainForm.Cats)
                     {
                         var d = Path.Combine(localDir, c); if (!Directory.Exists(d)) continue;
-                        var l = Directory.GetFiles(d, "*.png", SearchOption.AllDirectories).OrderBy(f => f, StringComparer.OrdinalIgnoreCase).Select(f => { var it = MakeItem(Path.GetFileNameWithoutExtension(f)); it.File = f; it.Rel = f.Substring(localDir.Length + 1); return it; }).Where(it => !Placeholder(it.Name, it.File)).OrderBy(it => it.Key, StringComparer.Ordinal).ToList();
+                        var l = Directory.GetFiles(d, "*.png", SearchOption.AllDirectories).OrderBy(f => f, StringComparer.OrdinalIgnoreCase).Select(f => { var it = MakeItem(Path.GetFileNameWithoutExtension(f)); it.File = f; it.Rel = f.Substring(localDir.TrimEnd('\\').Length + 1); it.Id = it.Rel; try { var fi = new FileInfo(f); it.Len = fi.Length; it.Ticks = fi.LastWriteTimeUtc.Ticks; } catch { } return it; }).Where(it => !Placeholder(it.Name, it.File)).OrderBy(it => it.Key, StringComparer.Ordinal).ToList();
                         if (l.Count > 0) res[c] = l;
                     }
+                    tset = ThumbStore.ForLocal(localDir);
                 }
                 else if (rem != null)
                 {
@@ -2363,11 +2585,17 @@ namespace DbdCustom
                         var nm = en.Name.Substring(en.Name.LastIndexOf('/') + 1);
                         var it = MakeItem(nm.Substring(0, nm.Length - 4)); if (Placeholder(it.Name, en.Name)) continue;
                         var safe = new string(en.Name.Select(ch => char.IsLetterOrDigit(ch) || ch == '_' || ch == '.' || ch == '-' ? ch : '_').ToArray());
-                        it.E = en; it.File = Path.Combine(peekDir, safe); it.Rel = en.Name.Substring(en.Name.IndexOf('/') + 1).Replace('/', '\\');
+                        it.E = en; it.Id = en.Name; it.File = Path.Combine(peekDir, safe); it.Rel = en.Name.Substring(en.Name.IndexOf('/') + 1).Replace('/', '\\');
                         Remote.ZEntry tz; if (thumbs.TryGetValue(en.Name, out tz)) { it.TE = tz; it.TFile = Path.Combine(peekDir, "t", safe); }
                         l.Add(it);
                     }
                     foreach (var k in res.Keys.ToList()) res[k] = res[k].OrderBy(x => x.Key, StringComparer.Ordinal).ToList();
+                    if (!string.IsNullOrEmpty(rem.Thumbs))
+                    {
+                        var ts = ThumbStore.ForRemote(rem);
+                        if (ts.Map.Count == 0) { var rp = rem; new System.Threading.Thread(() => { ThumbStore.FetchRemote(rp); dirty = true; }) { IsBackground = true }.Start(); }
+                        tset = ts;
+                    }
                 }
             }
             catch { listFail = true; }
@@ -2376,7 +2604,7 @@ namespace DbdCustom
                 BeginInvoke((Action)(() =>
                 {
                     foreach (var c in MainForm.Cats) if (res.ContainsKey(c)) { cats.Add(c); items[c] = res[c]; }
-                    listing = false; if (cats.Count == 0 && rem != null) listFail = true; search.Visible = cats.Count > 0; try { SendMessage(search.Handle, 0x1501, (IntPtr)1, L.T("Suchen …")); } catch { } Invalidate();
+                    listing = false; if (cats.Count == 0 && rem != null) listFail = true; if (localDir != null && tset != null) StartFill(); search.Visible = cats.Count > 0; try { SendMessage(search.Handle, 0x1501, (IntPtr)1, L.T("Suchen …")); } catch { } Invalidate();
                 }));
             }
             catch { }
@@ -2396,7 +2624,7 @@ namespace DbdCustom
                 }
                 if (batch.Count == 0) continue;
                 // fehlende Bilder aus dem Netz holen – mehrere pro Anfrage
-                if (rem != null)
+                if (rem != null && localDir == null)
                 {
                     var need = new Dictionary<Remote.ZEntry, string>();
                     foreach (var it in batch)
@@ -2420,9 +2648,13 @@ namespace DbdCustom
                     if (closing) return;
                     try
                     {
-                        string src = it.TFile != null && System.IO.File.Exists(it.TFile) ? it.TFile : it.File;
-                        Bitmap th;
-                        using (var fs = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) using (var im = Image.FromStream(fs)) th = Shrink(im, UI.S(Thumb));
+                        Bitmap th; var ts = tset;
+                        if (localDir != null && ts != null) th = ThumbStore.Decode(ThumbStore.MakeLocal(ts, it.Id, it.File, it.Len, it.Ticks));
+                        else
+                        {
+                            string src = it.TFile != null && System.IO.File.Exists(it.TFile) ? it.TFile : it.File;
+                            using (var fs = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) using (var im = Image.FromStream(fs)) th = ThumbStore.Shrink(im, UI.S(Thumb));
+                        }
                         if (closing) { th.Dispose(); return; }
                         it.Thumb = th;
                     }
@@ -2431,13 +2663,32 @@ namespace DbdCustom
                 }
             }
         }
-        static Bitmap Shrink(Image im, int side)
+        // alle Miniaturen des Packs vorbereiten – aktuelle Kategorie zuerst; danach für das nächste Öffnen speichern
+        void StartFill()
         {
-            float k = Math.Min(1f, Math.Min((float)side / im.Width, (float)side / im.Height));
-            int w = Math.Max(1, (int)Math.Round(im.Width * k)), h = Math.Max(1, (int)Math.Round(im.Height * k));
-            var b = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
-            using (var g = Graphics.FromImage(b)) { g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.PixelOffsetMode = PixelOffsetMode.HighQuality; g.CompositingQuality = CompositingQuality.HighQuality; g.DrawImage(im, 0, 0, w, h); }
-            return b;
+            var ts = tset; if (ts == null) return;
+            var order = new List<Item>(); if (cats.Count > 0) order.AddRange(items[cats[cat]]);
+            foreach (var c in cats) if (c != cats[cat]) order.AddRange(items[c]);
+            var ids = order.Select(x => x.Id).ToList();
+            new System.Threading.Thread(() =>
+            {
+                int next = -1; var ths = new List<System.Threading.Thread>();
+                for (int w = 0; w < Math.Max(2, Math.Min(6, Environment.ProcessorCount - 1)); w++)
+                {
+                    var t = new System.Threading.Thread(() =>
+                    {
+                        int i;
+                        while (!closing && (i = System.Threading.Interlocked.Increment(ref next)) < order.Count)
+                        {
+                            var it = order[i];
+                            try { if (ThumbStore.Peek(ts, it.Id, it.Len, it.Ticks) == null) { ThumbStore.MakeLocal(ts, it.Id, it.File, it.Len, it.Ticks); if (it.Visible) dirty = true; } } catch { }
+                        }
+                    }) { IsBackground = true, Priority = System.Threading.ThreadPriority.BelowNormal };
+                    ths.Add(t); t.Start();
+                }
+                ths.ForEach(t => t.Join());
+                if (!closing) { ThumbStore.Prune(ts, ids); ThumbStore.Save(ts); }
+            }) { IsBackground = true }.Start();
         }
         void SetCat(int c)
         {
@@ -2453,7 +2704,16 @@ namespace DbdCustom
             if (query.Length == 0) return true;
             return it.Show.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 || it.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
         }
-        List<Item> View { get { if (cats.Count == 0) return new List<Item>(); int k = HasKinds(cats[cat]) ? kindSel : 0; return items[cats[cat]].Where(x => Match(x, k)).ToList(); } }
+        List<Item> View
+        {
+            get
+            {
+                if (cats.Count == 0) return new List<Item>();
+                int k = HasKinds(cats[cat]) ? kindSel : 0; string key = cat + "|" + k + "|" + query;
+                if (viewCache == null || viewKey != key) { viewCache = items[cats[cat]].Where(x => Match(x, k)).ToList(); viewKey = key; }
+                return viewCache;
+            }
+        }
         RectangleF GridRect { get { int W = ClientSize.Width, H = ClientSize.Height; float top = UI.S(60) + UI.S(112); return new RectangleF(UI.S(22), top, W - UI.S(44), H - top - UI.S(42)); } }
         int Cols { get { return Math.Max(1, (int)((GridRect.Width + UI.S(8)) / UI.S(Cell))); } }
         float MaxScroll { get { if (cats.Count == 0) return 0; int n = View.Count; int rows = (n + Cols - 1) / Cols; return Math.Max(0, rows * UI.S(CellH) - GridRect.Height + UI.S(8)); } }
@@ -2544,14 +2804,20 @@ namespace DbdCustom
             scrollTarget = Math.Max(0, Math.Min(scrollTarget, MaxScroll)); scroll = Math.Max(0, Math.Min(scroll, MaxScroll + 1));
             var oc = g.Clip; g.SetClip(new RectangleF(0, gr.Y, W, gr.Height), CombineMode.Intersect);
             var need = new List<Item>();
-            foreach (var l in items.Values) foreach (var it in l) it.Visible = false;
+            foreach (var it in lastVis) it.Visible = false; lastVis.Clear();
+            int budget = 48; var ts0 = tset;
             using (var fs = UI.F(8f))
                 for (int i = 0; i < list.Count; i++)
                 {
                     var r = CellRect(i); var it = list[i];
                     bool vis = r.Bottom > gr.Y - UI.S(Cell) && r.Y < gr.Bottom + UI.S(Cell);   // eine Reihe Vorlauf
                     if (!vis) continue;
-                    it.Visible = true;
+                    it.Visible = true; lastVis.Add(it);
+                    if (it.Thumb == null && !it.Failed && ts0 != null && budget > 0)
+                    {
+                        var png = ThumbStore.Peek(ts0, it.Id, it.Len, it.Ticks);
+                        if (png != null) { budget--; try { it.Thumb = ThumbStore.Decode(png); } catch { it.Failed = true; } }
+                    }
                     bool ov = it == hover;
                     using (var path = UI.Round(r, UI.S(10)))
                     {
@@ -2575,7 +2841,7 @@ namespace DbdCustom
                         float a = (Environment.TickCount / 4 + i * 40) % 360;
                         using (var p = new Pen(UI.A(UI.Red, 140), UI.Sf(2f))) g.DrawArc(p, r.X + r.Width / 2 - UI.S(10), r.Y + r.Height / 2 - UI.S(10), UI.S(20), UI.S(20), a, 100);
                         dirty = true;
-                        if (!it.Queued) need.Add(it);
+                        if (!it.Queued && !(ts0 != null && localDir == null && (ts0.Fetching || ThumbStore.Peek(ts0, it.Id, 0, 0) != null))) need.Add(it);
                     }
                 }
             g.Clip = oc;
