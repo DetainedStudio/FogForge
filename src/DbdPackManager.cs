@@ -26,7 +26,7 @@ using Microsoft.Win32;
 namespace DbdCustom
 {
     // Programmversion – bei jedem Release erhöhen und als Tag v<Version> auf GitHub veröffentlichen
-    static class AppInfo { public const string Version = "4.3.4"; }
+    static class AppInfo { public const string Version = "4.3.5"; }
 
     // ============================================================ Design
     static class UI
@@ -2500,7 +2500,7 @@ namespace DbdCustom
         {
             return Remote.IsPlaceholder(path ?? name);
         }
-        readonly string pack, localDir, peekDir, defaultDir; readonly Remote.RPack rem; readonly bool installed; readonly Func<string, string> getOv; readonly Action<string, string> setOv;
+        readonly string pack, localDir, peekDir, defaultDir, origCache; readonly Remote.RPack rem; readonly bool installed; readonly Func<string, string> getOv; readonly Action<string, string> setOv;
         Bitmap zoomOrig; float split = 0.5f; bool dragging; RectangleF zoomR, useR; bool overUse;
         readonly List<string> cats = new List<string>(); readonly Dictionary<string, List<Item>> items = new Dictionary<string, List<Item>>();
         int cat, kindSel; float scroll, scrollTarget; TextBox search; string query = ""; List<RectangleF> kindR = new List<RectangleF>(); int overKind = -1; RectangleF searchR; bool listing = true, listFail, closing; Item hover, zoom; Bitmap zoomImg;
@@ -2513,7 +2513,7 @@ namespace DbdCustom
         public PackPreview(string pack, string localDir, Remote.RPack rem, string cacheDir, bool installed, string defaultDir, Func<string, string> getOv, Action<string, string> setOv, Image art = null)
         {
             this.art = art == null ? null : new Bitmap(art);
-            this.pack = pack; this.localDir = localDir; this.rem = localDir == null ? rem : null; this.installed = installed && localDir != null; this.getOv = getOv; this.setOv = setOv;
+            this.pack = pack; this.localDir = localDir; this.origCache = Path.Combine(cacheDir ?? Path.GetTempPath(), "orig"); this.rem = localDir == null ? rem : null; this.installed = installed && localDir != null; this.getOv = getOv; this.setOv = setOv;
             this.defaultDir = pack.Equals("Default", StringComparison.OrdinalIgnoreCase) ? null : defaultDir;
             if (this.rem != null) { var st = rem.Stamp ?? "v"; peekDir = Path.Combine(cacheDir ?? Path.GetTempPath(), "peek", pack + "-" + new string(st.Where(char.IsLetterOrDigit).Take(12).ToArray())); }
             FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; StartPosition = FormStartPosition.CenterParent;
@@ -3007,6 +3007,16 @@ namespace DbdCustom
                 if (zoomOrig != null) { zoomOrig.Dispose(); zoomOrig = null; }
                 if (defaultDir != null && it.Rel != null)
                     try { var of = Path.Combine(defaultDir, it.Rel); if (File.Exists(of)) using (var fs = new FileStream(of, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) using (var im = Image.FromStream(fs)) zoomOrig = new Bitmap(im); } catch { }
+                // neue Kapitel: Originale liegen nicht im Spielordner (nur in den .pak-Dateien) -> Original aus dem offiziellen DbD-Wiki holen
+                if (zoomOrig == null && defaultDir != null && it.Rel != null)
+                {
+                    var ot = it; var oname = Path.GetFileName(it.Rel);
+                    new System.Threading.Thread(() =>
+                    {
+                        var ob = Remote.FetchOriginal(oname, origCache);
+                        try { BeginInvoke((Action)(() => { if (zoom == ot && zoomOrig == null && ob != null) { zoomOrig = ob; split = 0.5f; Invalidate(); } else if (ob != null) ob.Dispose(); })); } catch { if (ob != null) ob.Dispose(); }
+                    }) { IsBackground = true }.Start();
+                }
                 Invalidate();
                 var target = it;
                 new System.Threading.Thread(() =>

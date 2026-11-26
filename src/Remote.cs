@@ -245,6 +245,40 @@ namespace DbdCustom
             }
             return list;
         }
+        // Original-Icon aus dem offiziellen Dead-by-Daylight-Wiki (für neue Kapitel, deren Originale nur in den .pak-Dateien stecken)
+        public static Bitmap FetchOriginal(string fileName, string cacheDir)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(fileName) || fileName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return null;
+                var f = Path.Combine(cacheDir, fileName);
+                if (!System.IO.File.Exists(f))
+                {
+                    var names = new List<string> { fileName };
+                    if (fileName.StartsWith("T_UI_", StringComparison.OrdinalIgnoreCase)) names.Add(fileName.Substring(5));
+                    foreach (var n in names)
+                    {
+                        try
+                        {
+                            var rq = Req("https://deadbydaylight.wiki.gg/images/" + Uri.EscapeDataString(n), 15000);
+                            using (var resp = (HttpWebResponse)rq.GetResponse())
+                            {
+                                if ((resp.ContentType ?? "").IndexOf("image", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                                byte[] data; using (var s = resp.GetResponseStream()) using (var ms = new MemoryStream()) { s.CopyTo(ms); data = ms.ToArray(); }
+                                using (var test = Image.FromStream(new MemoryStream(data))) { }
+                                Directory.CreateDirectory(cacheDir); System.IO.File.WriteAllBytes(f + ".part", data);
+                                if (System.IO.File.Exists(f)) System.IO.File.Delete(f); System.IO.File.Move(f + ".part", f);
+                                break;
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                if (System.IO.File.Exists(f)) using (var fs = new FileStream(f, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) using (var im = Image.FromStream(fs)) return new Bitmap(im);
+            }
+            catch { }
+            return null;
+        }
         // kleine Datei aus dem Release komplett laden (z. B. <Name>-thumbs.zip für die Vorschau)
         public static byte[] GetAsset(string asset)
         {
