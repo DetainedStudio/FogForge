@@ -2,8 +2,8 @@
 1 ICON "app.ico"
 1 24 "app.manifest"
 1 VERSIONINFO
-FILEVERSION 4,3,4,0
-PRODUCTVERSION 4,3,4,0
+FILEVERSION 4,3,3,0
+PRODUCTVERSION 4,3,3,0
 FILEOS 0x40004
 FILETYPE 0x1
 BEGIN
@@ -13,12 +13,12 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "FogForge"
       VALUE "FileDescription", "FogForge – Icon-Packs für Dead by Daylight"
-      VALUE "FileVersion", "4.3.4.0"
+      VALUE "FileVersion", "4.3.3.0"
       VALUE "InternalName", "FogForge"
       VALUE "LegalCopyright", "© 2026 FogForge. Inoffizielles Fan-Tool, nicht mit Behaviour Interactive verbunden."
       VALUE "OriginalFilename", "FogForge.exe"
       VALUE "ProductName", "FogForge"
-      VALUE "ProductVersion", "4.3.4.0"
+      VALUE "ProductVersion", "4.3.3.0"
       VALUE "Comments", "Aktiviert, wechselt und entlädt Icon-Packs. Verändert keine .pak-Dateien."
     END
   END
