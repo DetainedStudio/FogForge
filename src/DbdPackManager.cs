@@ -26,7 +26,7 @@ using Microsoft.Win32;
 namespace DbdCustom
 {
     // Programmversion – bei jedem Release erhöhen und als Tag v<Version> auf GitHub veröffentlichen
-    static class AppInfo { public const string Version = "4.3.6"; }
+    static class AppInfo { public const string Version = "4.3.7"; }
 
     // ============================================================ Design
     static class UI
@@ -2518,7 +2518,7 @@ namespace DbdCustom
         int cat, kindSel; float scroll, scrollTarget; TextBox search; string query = ""; List<RectangleF> kindR = new List<RectangleF>(); int overKind = -1; RectangleF searchR; bool listing = true, listFail, closing; Item hover, zoom; Bitmap zoomImg;
         List<RectangleF> tabR = new List<RectangleF>(); RectangleF closeR; int overTab = -1; bool overClose;
         readonly List<Item> queue = new List<Item>(); readonly object qlock = new object(); volatile bool dirty; Timer tick;
-        int lastRefetch, refetches; volatile ThumbStore.Set tset; List<Item> viewCache; string viewKey; readonly List<Item> lastVis = new List<Item>();
+        int lastRefetch, refetches; volatile bool zoomFull; volatile ThumbStore.Set tset; List<Item> viewCache; string viewKey; readonly List<Item> lastVis = new List<Item>();
         const int Cell = 118, CellH = 140, Thumb = 100, HeadH = 84;
         readonly Image art; Bitmap bgArt, headArt;
 
@@ -2949,6 +2949,13 @@ namespace DbdCustom
                         }
                     }
                     else drawFit(zoomImg, zr);
+                    if (!zoomFull)
+                    {
+                        float a = (Environment.TickCount / 3) % 360, cx = zr.X + side / 2, cy = zr.Bottom - UI.S(34);
+                        using (var b = new SolidBrush(Color.FromArgb(170, 10, 9, 12))) g.FillEllipse(b, cx - UI.S(20), cy - UI.S(20), UI.S(40), UI.S(40));
+                        using (var p = new Pen(UI.Red, UI.Sf(2.5f))) g.DrawArc(p, cx - UI.S(12), cy - UI.S(12), UI.S(24), UI.S(24), a, 110);
+                        dirty = true;
+                    }
                     float ny = zr.Bottom + UI.S(14);
                     using (var f = UI.F(10.5f, FontStyle.Bold)) UI.Txt(g, zoom.Show, f, UI.Text, new RectangleF(0, ny, W, UI.S(24)), StringAlignment.Center);
                     using (var f = UI.F(8.5f)) UI.Txt(g, zoom.Name + ".png" + (zoomOrig != null ? "   ·   " + L.T("Regler ziehen zum Vergleichen") : ""), f, UI.Dim, new RectangleF(0, ny + UI.S(22), W, UI.S(18)), StringAlignment.Center);
@@ -3019,7 +3026,7 @@ namespace DbdCustom
             if (it != null && it.Thumb != null)
             {
                 zoom = it; if (zoomImg != null) { zoomImg.Dispose(); zoomImg = null; }
-                zoomImg = new Bitmap(it.Thumb); split = 0.5f; search.Visible = false;
+                zoomImg = new Bitmap(it.Thumb); zoomFull = false; split = 0.5f; search.Visible = false;
                 if (zoomOrig != null) { zoomOrig.Dispose(); zoomOrig = null; }
                 if (defaultDir != null && it.Rel != null)
                     try { var of = Path.Combine(defaultDir, it.Rel); if (File.Exists(of)) using (var fs = new FileStream(of, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) using (var im = Image.FromStream(fs)) zoomOrig = new Bitmap(im); } catch { }
@@ -3037,17 +3044,22 @@ namespace DbdCustom
                 var target = it;
                 new System.Threading.Thread(() =>
                 {
-                    try
+                    // volle Auflösung laden (bei Packs aus dem Netz mit mehreren Versuchen); bis dahin wird die Miniatur mit Ladeanzeige gezeigt
+                    for (int attempt = 0; attempt < 4 && zoom == target && !closing; attempt++)
                     {
-                        if (!System.IO.File.Exists(target.File) && target.E != null)
+                        try
                         {
-                            var data = Remote.ReadEntry(rem, target.E); Directory.CreateDirectory(Path.GetDirectoryName(target.File));
-                            System.IO.File.WriteAllBytes(target.File + ".part", data); if (System.IO.File.Exists(target.File)) System.IO.File.Delete(target.File); System.IO.File.Move(target.File + ".part", target.File);
+                            if (!System.IO.File.Exists(target.File) && target.E != null)
+                            {
+                                var data = Remote.ReadEntry(rem, target.E); Directory.CreateDirectory(Path.GetDirectoryName(target.File));
+                                System.IO.File.WriteAllBytes(target.File + ".part", data); if (System.IO.File.Exists(target.File)) System.IO.File.Delete(target.File); System.IO.File.Move(target.File + ".part", target.File);
+                            }
+                            Bitmap full; using (var fs = new FileStream(target.File, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) using (var im = Image.FromStream(fs)) full = new Bitmap(im);
+                            BeginInvoke((Action)(() => { if (zoom == target) { if (zoomImg != null) zoomImg.Dispose(); zoomImg = full; zoomFull = true; Invalidate(); } else full.Dispose(); }));
+                            return;
                         }
-                        Bitmap full; using (var fs = new FileStream(target.File, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) using (var im = Image.FromStream(fs)) full = new Bitmap(im);
-                        BeginInvoke((Action)(() => { if (zoom == target) { if (zoomImg != null) zoomImg.Dispose(); zoomImg = full; Invalidate(); } else full.Dispose(); }));
+                        catch { try { if (System.IO.File.Exists(target.File)) System.IO.File.Delete(target.File); } catch { } System.Threading.Thread.Sleep(800 * (attempt + 1)); }
                     }
-                    catch { }
                 }) { IsBackground = true }.Start();
                 return;
             }
